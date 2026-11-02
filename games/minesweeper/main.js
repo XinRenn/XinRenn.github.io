@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio } from '../../shared/sfx.js';
+import { createNatureEnv } from '../../shared/nature-env.js';
 
 // ================= 可调参数 =================
 const PRESETS = {
@@ -12,9 +13,10 @@ const PRESETS = {
   hard:   { label: '困难', cols: 6, rows: 6, cell: 0.33, mines: 8 },
 };
 const DWELL = 0.7; // 站在一格上多少秒才翻开
+// 石板（未翻开）、泥土（已翻开）、木框
 const COLORS = {
-  hidden: 0x55689a, open: 0x1f2a44, stand: 0x2fbf7f, hover: 0x3d5ccc,
-  frame: 0x7d8cff, wrongFlag: 0x8a2530, boom: 0xff3b30,
+  hidden: 0xd6cdb9, open: 0x4a3f33, stand: 0x2fbf7f, hover: 0x3d6ccc,
+  frame: 0x9a6b3f, frameGlow: 0x2a1a0a, wrongFlag: 0x8a2530, boom: 0xff3b30,
 };
 const NUM_COLORS = ['', '#5aa9ff', '#5fe07a', '#ff6b6b', '#c891ff', '#ffb547', '#45e0d8', '#ffffff', '#b4bdd0'];
 
@@ -22,45 +24,15 @@ const NUM_COLORS = ['', '#5aa9ff', '#5fe07a', '#ff6b6b', '#c891ff', '#ffb547', '
 const app = createXRApp({ onFrame });
 const { scene, camera, renderer } = app;
 
-const BG = new THREE.Color(0x0d1220);
-const FOG = new THREE.Fog(0x0d1220, 7, 24);
-scene.background = BG;
-scene.fog = FOG;
-scene.add(new THREE.HemisphereLight(0xc4d4ff, 0x1a1f2e, 1.2));
-const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-sun.position.set(2, 6, 3);
-scene.add(sun);
-
-// 只在纯 VR 模式下显示的环境（混合现实模式下你看到的是自己的房间）
-const env = new THREE.Group();
-scene.add(env);
-{
-  const ground = new THREE.Mesh(
-    new THREE.CircleGeometry(30, 64),
-    new THREE.MeshStandardMaterial({ color: 0x141a2b, roughness: 1 })
-  );
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.003;
-  env.add(ground);
-  const grid = new THREE.GridHelper(40, 80, 0x26304a, 0x1a2134);
-  grid.position.y = -0.002;
-  env.add(grid);
-  const starGeo = new THREE.BufferGeometry();
-  const pts = [];
-  for (let i = 0; i < 600; i++) {
-    const v = new THREE.Vector3().randomDirection();
-    v.y = Math.abs(v.y) * 0.9 + 0.05;
-    pts.push(...v.multiplyScalar(45).toArray());
-  }
-  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-  env.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.15, fog: false })));
-}
+// 大自然背景（混合现实模式下隐藏，你看到的是自己的房间）
+const nature = createNatureEnv({ clearRadius: 4 });
+scene.add(nature.group, ...nature.lights);
+scene.fog = nature.fog;
 
 app.on('modechange', (mode) => {
   const ar = mode === 'ar';
-  env.visible = !ar;
-  scene.background = ar ? null : BG;
-  scene.fog = ar ? null : FOG;
+  nature.group.visible = !ar;
+  scene.fog = ar ? null : nature.fog;
   overlay.classList.toggle('hidden', mode !== 'desktop' || desktopPreview);
   backLink.style.display = mode === 'desktop' ? '' : 'none';
   if (mode !== 'desktop') placeAfter = 0.4; // 进入后稍等一下再把雷区放到面前
@@ -194,7 +166,7 @@ function buildBoard() {
   D = rows * cell;
 
   // 边框
-  const frameMat = new THREE.MeshStandardMaterial({ color: COLORS.frame, emissive: 0x2a3399 });
+  const frameMat = new THREE.MeshStandardMaterial({ color: COLORS.frame, emissive: COLORS.frameGlow, roughness: 0.8 });
   const t = 0.03;
   for (const [w, d, x, z] of [
     [W + t * 2, t, 0, -D / 2 - t / 2], [W + t * 2, t, 0, D / 2 + t / 2],
@@ -602,6 +574,7 @@ function updateTileColors() {
 }
 
 function onFrame(dt) {
+  if (nature.group.visible) nature.update(dt);
   effects = effects.filter((e) => {
     const alive = e.update(dt);
     if (!alive) e.dispose?.();
@@ -717,5 +690,5 @@ board.position.set(0, 0, -(D / 2 + 0.4));
 // 方便调试：在浏览器控制台里可以用 window.minewalk 查看状态
 window.minewalk = {
   get state() { return state; }, get cells() { return cells; }, get cfg() { return cfg; },
-  board, newGame, reveal, toggleFlag, updateStanding,
+  board, newGame, reveal, toggleFlag, updateStanding, camera, controls,
 };
