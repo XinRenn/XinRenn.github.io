@@ -1,29 +1,32 @@
-// 蓄力跳台：蹲下蓄力、站起起跳，让小人跳到下一块平台上。
+// 蓄力跳台：蹲下蓄力、站起起跳，让小角色跳到下一个跳台上。
+// 跳台的样子随背景变化（池塘荷叶、码头木桩、屋顶跑酷……），见 themes.js。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio, chargeTone } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
+import { THEMES, makePawn, BASIN } from './themes.js';
 
 // ================= 可调参数 =================
 const CROUCH_START = 0.07;   // 头部下降多少米开始算蓄力
 const CROUCH_FULL = 0.5;     // 下降多少米算满蓄力
 const TRIGGER_FULL = 1.1;    // 扳机按住多少秒算满蓄力
 const JUMP_MIN = 0.08, JUMP_MAX = 0.95; // 蓄力 0 → 1 对应的跳跃距离（米）
-const PERFECT = 0.16;        // 落点离中心 < 平台尺寸 × 这个比例 = 正中靶心
-const TABLE_DROP = 0.75;     // 平台比你站立时的头低多少米
-const TABLE_AHEAD = 0.55;    // 平台在你面前多远
-const PALETTE = ['#7cc6fe', '#ff9f80', '#a0e7a0', '#ffd6a5', '#cdb4ff', '#9bf6ff', '#ffadad', '#fdffb6'];
+const PERFECT = 0.16;        // 落点离中心 < 跳台尺寸 × 这个比例 = 正中靶心
+const TABLE_DROP = 0.75;     // 跳台比你站立时的头低多少米
+const TABLE_AHEAD = 0.55;    // 跳台在你面前多远
 
 // ================= 场景 =================
 const app = createXRApp({ onFrame });
 const { scene, camera, renderer } = app;
+const uTime = { value: 0 };
 
 const envs = createEnvManager(scene, {
   onChange: (def) => {
     envButton?.userData.ui.setLabel(`背景：${def.label} ▶`);
     if (envSelect) envSelect.value = def.key;
+    applyTheme(def.key);
   },
 });
 envs.set(savedEnvKey());
@@ -39,96 +42,12 @@ app.on('modechange', (mode) => {
 function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } }
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
-// rig：放在你面前的“桌面”，course：所有平台和小人（每次落地后平移，让当前平台回到中间）
+// rig：你面前的小场景（底座固定在这里）；course：跳台和角色（每次落地后平移，让当前跳台回到中间）
 const rig = new THREE.Group();
 scene.add(rig);
 const course = new THREE.Group();
 rig.add(course);
 rig.position.set(0, 0.9, -TABLE_AHEAD);
-
-// ================= 小人 =================
-function makePawn() {
-  const g = new THREE.Group();
-  const prof = [[0, 0], [0.024, 0], [0.027, 0.006], [0.022, 0.022], [0.014, 0.045], [0.011, 0.056], [0.017, 0.062], [0, 0.064]]
-    .map(([r, y]) => new THREE.Vector2(r, y));
-  const mat = new THREE.MeshStandardMaterial({ color: '#ff6b6b', roughness: 0.45 });
-  const body = new THREE.Mesh(new THREE.LatheGeometry(prof, 24), mat);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.019, 20, 14), mat);
-  head.position.y = 0.08;
-  const eyeMat = new THREE.MeshBasicMaterial({ color: '#1b1b1b' });
-  for (const x of [-0.007, 0.007]) {
-    const e = new THREE.Mesh(new THREE.SphereGeometry(0.0035, 8, 6), eyeMat);
-    e.position.set(x, 0.083, 0.017);
-    g.add(e);
-  }
-  g.add(body, head);
-  return g;
-}
-const pawn = makePawn();
-course.add(pawn);
-
-// 小人的影子（落点判断的重要参考）
-const shadow = new THREE.Mesh(
-  new THREE.CircleGeometry(0.026, 24),
-  new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.35, depthWrite: false })
-);
-shadow.rotation.x = -Math.PI / 2;
-course.add(shadow);
-
-// 蓄力圈
-const chargeRing = new THREE.Mesh(
-  new THREE.RingGeometry(0.034, 0.042, 48, 1, 0, 0.001),
-  new THREE.MeshBasicMaterial({ color: '#5cffb0', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide })
-);
-chargeRing.rotation.x = -Math.PI / 2;
-course.add(chargeRing);
-
-// ================= 平台 =================
-let platforms = [];
-let cur = null, next = null;
-
-function makePlatform(x, z, size, h, shape, bonus = false) {
-  const g = new THREE.Group();
-  const color = bonus ? new THREE.Color('#ffcf3a') : new THREE.Color(PALETTE[Math.floor(Math.random() * PALETTE.length)]);
-  const sideMat = new THREE.MeshStandardMaterial({ color: color.clone().multiplyScalar(0.8), roughness: 0.6, emissive: bonus ? '#5a3a00' : '#000000' });
-  const topMat = new THREE.MeshStandardMaterial({ color, roughness: 0.5, emissive: bonus ? '#6a4a00' : '#000000' });
-  let bodyGeo, topGeo;
-  if (shape === 'box') {
-    bodyGeo = new THREE.BoxGeometry(size, h, size);
-    topGeo = new THREE.BoxGeometry(size * 1.02, 0.008, size * 1.02);
-  } else {
-    const seg = shape === 'hex' ? 6 : 36;
-    bodyGeo = new THREE.CylinderGeometry(size / 2, size / 2, h, seg);
-    topGeo = new THREE.CylinderGeometry(size / 2 * 1.02, size / 2 * 1.02, 0.008, seg);
-  }
-  bodyGeo.translate(0, h / 2, 0);
-  topGeo.translate(0, h - 0.004, 0);
-  const body = new THREE.Mesh(bodyGeo, sideMat);
-  const top = new THREE.Mesh(topGeo, topMat);
-  // 底下一小块岩石，让它看起来像悬浮的小岛
-  const rock = new THREE.Mesh(new THREE.ConeGeometry(size * 0.48, size * 0.55, shape === 'hex' ? 6 : 7), new THREE.MeshStandardMaterial({ color: '#7a6a5a', roughness: 1, flatShading: true }));
-  rock.rotation.x = Math.PI;
-  rock.position.y = -size * 0.275;
-  // 靶心标记（淡淡的同心圆）
-  const target = new THREE.Mesh(
-    new THREE.RingGeometry(size * PERFECT * 0.6, size * PERFECT, 32),
-    new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.35, depthWrite: false })
-  );
-  target.rotation.x = -Math.PI / 2;
-  target.position.y = h + 0.001;
-  g.add(body, top, rock, target);
-  if (bonus) {
-    const spark = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: '#fff2a8', transparent: true, opacity: 0.8, depthWrite: false, blending: THREE.AdditiveBlending }));
-    spark.position.y = h + 0.05;
-    spark.scale.setScalar(size * 1.4);
-    g.add(spark);
-  }
-  g.position.set(x, 0, z);
-  course.add(g);
-  const p = { group: g, body, top, x, z, size, h, shape, bonus, born: 0, squash: 1, springV: 0 };
-  platforms.push(p);
-  return p;
-}
 
 const glowTex = (() => {
   const c = document.createElement('canvas');
@@ -144,27 +63,113 @@ const glowTex = (() => {
   return t;
 })();
 
-function contains(p, x, z, margin = 0) {
-  const dx = x - p.x, dz = z - p.z;
-  if (p.shape === 'box') return Math.abs(dx) <= p.size / 2 + margin && Math.abs(dz) <= p.size / 2 + margin;
-  return Math.hypot(dx, dz) <= p.size / 2 + margin;
+// ================= 主题 =================
+let theme = null;
+let themeKey = null;
+let base = null;
+let pawn = new THREE.Group();
+course.add(pawn);
+
+function applyTheme(key) {
+  const t = THEMES[key] || THEMES.meadow;
+  themeKey = THEMES[key] ? key : 'meadow';
+  theme = t;
+  if (base) { rig.remove(base.object); disposeTree(base.object); }
+  base = t.base(uTime);
+  rig.add(base.object);
+  base.fit(rig.position.y);
+  course.remove(pawn);
+  disposeTree(pawn);
+  pawn = makePawn(t.pawn);
+  course.add(pawn);
+  newGame();
 }
 
-// 难度随分数增加：间距更大、平台更小
+function disposeTree(o) {
+  o.traverse((m) => {
+    if (!m.isSprite) m.geometry?.dispose();
+    const mats = Array.isArray(m.material) ? m.material : m.material ? [m.material] : [];
+    mats.forEach((x) => x.dispose());
+  });
+}
+
+// 角色的影子（判断落点的重要参考）
+const shadow = new THREE.Mesh(
+  new THREE.CircleGeometry(0.026, 24),
+  new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.35, depthWrite: false })
+);
+shadow.rotation.x = -Math.PI / 2;
+course.add(shadow);
+
+// 蓄力圈
+const chargeRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.034, 0.042, 48, 1, 0, 0.001),
+  new THREE.MeshBasicMaterial({ color: '#5cffb0', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide })
+);
+chargeRing.rotation.x = -Math.PI / 2;
+course.add(chargeRing);
+
+// ================= 跳台 =================
+let platforms = [];
+let cur = null, next = null;
+
+function buildPlatform(size, bonus = false) {
+  const r = theme.platform(size, base.floorY);
+  const p = {
+    group: r.group, x: 0, z: 0, w: r.w, d: r.d, h: r.h + (r.top || 0), shape: r.shape, bonus,
+    press: 0, pressV: 0, born: 0, dying: 0, coin: null,
+  };
+  const t = Math.min(p.w, p.d);
+  // 靶心标记（淡淡的同心圆）
+  const target = new THREE.Mesh(
+    new THREE.RingGeometry(t * PERFECT * 0.6, t * PERFECT, 32),
+    new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.4, depthWrite: false })
+  );
+  target.rotation.x = -Math.PI / 2;
+  target.position.y = p.h + 0.0015;
+  r.group.add(target);
+  // 金币：落到这个跳台上额外 +5
+  if (bonus) {
+    const coin = new THREE.Group();
+    const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.004, 24), new THREE.MeshStandardMaterial({ color: '#ffcf3a', metalness: 0.8, roughness: 0.25, emissive: '#5a3a00' }));
+    disc.rotation.x = Math.PI / 2;
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: '#fff2a8', transparent: true, opacity: 0.7, depthWrite: false, blending: THREE.AdditiveBlending }));
+    glow.scale.setScalar(0.07);
+    coin.add(disc, glow);
+    coin.position.y = p.h + 0.06;
+    r.group.add(coin);
+    p.coin = coin;
+  }
+  course.add(r.group);
+  platforms.push(p);
+  return p;
+}
+function place(p, x, z) {
+  p.x = x; p.z = z;
+  p.group.position.set(x, 0, z);
+}
+const extent = (p) => Math.max(p.w, p.d);
+const surfaceY = (p) => p.h + p.group.position.y;
+
+function contains(p, x, z) {
+  const dx = x - p.x, dz = z - p.z;
+  if (p.shape === 'box') return Math.abs(dx) <= p.w / 2 && Math.abs(dz) <= p.d / 2;
+  return Math.hypot(dx, dz) <= p.w / 2;
+}
+
+// 难度随分数增加：间距更大、跳台更小
 function spawnNext() {
   const k = Math.min(score, 40) / 40;
   const size = THREE.MathUtils.lerp(0.17, 0.11, k) + Math.random() * THREE.MathUtils.lerp(0.07, 0.05, k);
-  const h = 0.07 + Math.random() * 0.09;
-  const shape = ['box', 'cyl', 'hex'][Math.floor(Math.random() * 3)];
+  const bonus = score > 2 && Math.random() < 0.1;
+  next = buildPlatform(size, bonus);
   const side = Math.random() < 0.5 ? -1 : 1;
   const ang = Math.PI / 4 + (Math.random() - 0.5) * 0.25;
-  const dir = [Math.sin(ang) * side, -Math.cos(ang)];
-  const minD = (cur.size + size) * 0.75 + 0.04;
-  const maxD = Math.max(minD + 0.05, THREE.MathUtils.lerp(0.48, 0.74, k));
+  const minD = (extent(cur) + extent(next)) * 0.62 + 0.04;
+  const maxD = Math.max(minD + 0.05, THREE.MathUtils.lerp(0.48, 0.72, k));
   const d = minD + Math.random() * (maxD - minD);
-  const bonus = score > 2 && Math.random() < 0.1;
-  next = makePlatform(cur.x + dir[0] * d, cur.z + dir[1] * d, size, h, shape, bonus);
-  next.born = 0.001; // 触发落下来的出场动画
+  place(next, cur.x + Math.sin(ang) * side * d, cur.z - Math.cos(ang) * d);
+  next.born = 0.001; // 触发出场动画
 }
 
 // ================= 游戏状态 =================
@@ -176,34 +181,34 @@ let jump = null;
 let pan = null;
 let crouchEnabled = loadPref('jump-crouch', '1') === '1';
 let statusText = '';
-const popups = [];
+const effects = [];
 
 function newGame() {
-  for (const p of platforms) {
-    course.remove(p.group);
-    p.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
-  }
+  if (!theme) return;
+  for (const p of platforms) { course.remove(p.group); disposeTree(p.group); }
   platforms = [];
   course.position.set(0, 0, 0);
   pan = null;
   score = 0;
   combo = 0;
-  cur = makePlatform(0, 0, 0.2, 0.12, 'cyl');
+  cur = buildPlatform(0.2);
+  place(cur, 0, 0);
   spawnNext();
   next.born = 0;
   pawn.position.set(0, cur.h, 0);
   pawn.rotation.set(0, 0, 0);
   pawn.scale.setScalar(1);
+  pawn.visible = true;
   facePawn();
   state = 'idle';
   stopCharge(false);
-  setStatus(crouchEnabled ? '站直，然后蹲下蓄力' : '按住扳机蓄力，松开起跳');
+  setStatus(crouchEnabled ? `${theme.name}：站直，然后蹲下蓄力` : `${theme.name}：按住扳机蓄力`);
   sfx.click();
 }
 
 function facePawn() {
-  const dx = next.x - pawn.position.x, dz = next.z - pawn.position.z;
-  pawn.rotation.y = Math.atan2(dx, dz);
+  pawn.rotation.order = 'YXZ';
+  pawn.rotation.y = Math.atan2(next.x - pawn.position.x, next.z - pawn.position.z);
 }
 
 function startCharge(mode) {
@@ -243,7 +248,7 @@ function doJump(power) {
   const peak = 0.06 + dist * 0.16;
   jump = { from, land, dir, endY, T, t: 0, peak, target, startY: from.y };
   state = 'jumping';
-  cur.springV = 6; // 平台回弹
+  cur.pressV = -2.5; // 跳台回弹
   sfx.jump();
   app.pulseAll(0.5, 40);
 }
@@ -254,24 +259,26 @@ function finishLanding() {
   pawn.rotation.x = 0;
   sfx.land();
   app.pulseAll(0.6, 60);
-  t.springV = -5;
+  t.pressV = 1.2;
   if (t === next) {
     const off = Math.hypot(jump.land.x - t.x, jump.land.z - t.z);
     let gained = 1;
     let label = '+1';
-    if (off <= t.size * PERFECT) {
+    if (off <= Math.min(t.w, t.d) * PERFECT) {
       combo++;
       gained = 2 * combo;
       label = combo > 1 ? `靶心 ×${combo}  +${gained}` : `靶心 +${gained}`;
       sfx.perfect(combo);
-      ripple(t);
+      ripple(t.x, surfaceY(t) + 0.003, t.z);
     } else {
       combo = 0;
     }
-    if (t.bonus) { gained += 5; label += '  金色 +5'; sfx.bonus(); }
+    if (t.bonus && t.coin) { gained += 5; label += '  金币 +5'; sfx.bonus(); collectCoin(t); }
     score += gained;
     popup(label, t);
+    const prev = cur;
     cur = t;
+    prev.dying = 0.001; // 旧跳台沉下去
     spawnNext();
     startPan();
     setStatus(combo > 1 ? `连续靶心 ${combo} 次！` : '漂亮！继续');
@@ -283,17 +290,52 @@ function finishLanding() {
   jump = null;
 }
 
+// 掉下去：水里溅起水花、水族箱里慢慢沉下去、城市里摔到街上
+function insideBasin(x, z) {
+  const lx = x + course.position.x, lz = z + course.position.z - BASIN.cz;
+  return Math.abs(lx) < BASIN.w / 2 - 0.05 && Math.abs(lz) < BASIN.d / 2 - 0.05;
+}
 function startFall() {
   state = 'falling';
-  const v = jump.dir.clone().multiplyScalar(0.6);
-  jump.fall = { v, vy: 0, spin: 0 };
+  jump.fall = { v: jump.dir.clone().multiplyScalar(0.5), vy: -0.2, splashed: false };
   sfx.fall();
   combo = 0;
+}
+function updateFall(dt) {
+  const f = jump.fall;
+  const p = pawn.position;
+  const kind = insideBasin(p.x, p.z) ? theme.fall : 'floor';
+  if (kind === 'sink') {
+    f.vy = Math.max(f.vy - 1.2 * dt, -0.25); // 在水里下沉得慢
+    f.v.multiplyScalar(1 - dt * 2);
+    if (Math.random() < dt * 25) bubble(p.x, p.y + 0.04, p.z);
+  } else if (kind === 'water' && f.splashed) {
+    f.vy = -0.06;
+    f.v.multiplyScalar(1 - dt * 4);
+  } else {
+    f.vy -= 9.8 * dt;
+  }
+  p.addScaledVector(f.v, dt);
+  p.y += f.vy * dt;
+  pawn.rotation.x += dt * (kind === 'sink' ? 2 : 8);
+  pawn.rotation.z += dt * (kind === 'sink' ? 1 : 3);
+  if (kind === 'water' && !f.splashed && p.y <= 0) {
+    f.splashed = true;
+    splash(p.x, p.z);
+    f.until = 0.7;
+  }
+  if (kind === 'water' && f.splashed) {
+    f.until -= dt;
+    if (f.until <= 0) { pawn.visible = false; gameOver(); }
+    return;
+  }
+  const floorY = kind === 'floor' ? -rig.position.y + 0.005 : base.floorY + 0.005;
+  if (p.y <= floorY) { p.y = floorY; gameOver(); }
 }
 
 function gameOver() {
   state = 'over';
-  sfx.thud();
+  if (theme.fall !== 'water') sfx.thud();
   app.pulseAll(1, 300);
   const record = score > best;
   if (record) { best = score; savePref('jump-best', String(best)); }
@@ -302,48 +344,81 @@ function gameOver() {
 
 function startPan() {
   pan = { from: course.position.clone(), to: new THREE.Vector3(-cur.x, 0, -cur.z), t: 0 };
-  // 太远的旧平台删掉
-  while (platforms.length > 5) {
-    const old = platforms.shift();
-    course.remove(old.group);
-    old.group.traverse((o) => { o.geometry?.dispose(); o.material?.dispose?.(); });
-  }
 }
 
 // ================= 特效 =================
-function ripple(p) {
+function addEffect(obj, life, update) {
+  course.add(obj);
+  effects.push({ obj, t: 0, life, update });
+}
+function ripple(x, y, z, color = '#ffffff') {
   const m = new THREE.Mesh(
     new THREE.RingGeometry(0.01, 0.014, 40),
-    new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide })
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide })
   );
   m.rotation.x = -Math.PI / 2;
-  m.position.set(p.x, p.h + 0.003, p.z);
-  course.add(m);
-  popups.push({ obj: m, t: 0, life: 0.6, update(k) { m.scale.setScalar(1 + k * 9); m.material.opacity = 0.9 * (1 - k); } });
+  m.position.set(x, y, z);
+  addEffect(m, 0.7, (k) => { m.scale.setScalar(1 + k * 9); m.material.opacity = 0.9 * (1 - k); });
 }
-
+function splash(x, z) {
+  sfx.thud();
+  ripple(x, 0.002, z);
+  setTimeout(() => ripple(x, 0.002, z), 150);
+  const n = 40;
+  const pos = new Float32Array(n * 3), vel = [];
+  for (let i = 0; i < n; i++) {
+    pos.set([x, 0.005, z], i * 3);
+    const a = Math.random() * Math.PI * 2, s = 0.15 + Math.random() * 0.35;
+    vel.push([Math.cos(a) * s * 0.4, 0.5 + Math.random() * 0.6, Math.sin(a) * s * 0.4]);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: glowTex, size: 0.018, color: '#e8f8ff', transparent: true, depthWrite: false }));
+  let last = 0;
+  addEffect(pts, 0.9, (k, t) => {
+    const dt = t - last; last = t;
+    for (let i = 0; i < n; i++) {
+      vel[i][1] -= 3 * dt;
+      pos[i * 3] += vel[i][0] * dt;
+      pos[i * 3 + 1] = Math.max(0, pos[i * 3 + 1] + vel[i][1] * dt);
+      pos[i * 3 + 2] += vel[i][2] * dt;
+    }
+    geo.attributes.position.needsUpdate = true;
+    pts.material.opacity = 1 - k;
+  });
+}
+function bubble(x, y, z) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: '#dffcff', transparent: true, opacity: 0.8, depthWrite: false }));
+  s.scale.setScalar(0.008 + Math.random() * 0.008);
+  s.position.set(x + (Math.random() - 0.5) * 0.03, y, z + (Math.random() - 0.5) * 0.03);
+  const y0 = s.position.y;
+  addEffect(s, 1.6, (k) => { s.position.y = y0 + k * 0.35; s.material.opacity = 0.8 * (1 - k); });
+}
+function collectCoin(p) {
+  const coin = p.coin;
+  p.coin = null;
+  const y0 = coin.position.y;
+  effects.push({ obj: null, t: 0, life: 0.6, update: (k) => { coin.position.y = y0 + k * 0.15; coin.scale.setScalar(1 + k); coin.rotation.y += 0.5; if (k >= 1) coin.visible = false; } });
+}
 function popup(text, p) {
-  const tex = (() => {
-    const c = document.createElement('canvas');
-    c.width = 512; c.height = 128;
-    const g = c.getContext('2d');
-    g.font = `800 72px ${FONT}`;
-    g.textAlign = 'center';
-    g.textBaseline = 'middle';
-    g.lineWidth = 10;
-    g.strokeStyle = 'rgba(0,0,0,0.6)';
-    g.strokeText(text, 256, 64);
-    g.fillStyle = text.includes('靶心') ? '#ffe066' : '#ffffff';
-    g.fillText(text, 256, 64);
-    const t = new THREE.CanvasTexture(c);
-    t.colorSpace = THREE.SRGBColorSpace;
-    return t;
-  })();
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  g.font = `800 72px ${FONT}`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineWidth = 10;
+  g.strokeStyle = 'rgba(0,0,0,0.6)';
+  g.strokeText(text, 256, 64);
+  g.fillStyle = text.includes('靶心') ? '#ffe066' : '#ffffff';
+  g.fillText(text, 256, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
   s.scale.set(0.24, 0.06, 1);
-  s.position.set(p.x, p.h + 0.12, p.z);
-  course.add(s);
-  popups.push({ obj: s, t: 0, life: 1.1, update(k) { s.position.y = p.h + 0.12 + k * 0.08; s.material.opacity = 1 - Math.max(0, k - 0.6) / 0.4; } });
+  const y0 = p.h + 0.12;
+  s.position.set(p.x, y0, p.z);
+  addEffect(s, 1.1, (k) => { s.position.y = y0 + k * 0.08; s.material.opacity = 1 - Math.max(0, k - 0.6) / 0.4; });
 }
 
 // ================= 面板 =================
@@ -389,6 +464,9 @@ function drawPanel() {
     ctx.fillStyle = '#eef2fb';
     ctx.font = `800 64px ${FONT}`;
     ctx.fillText('蓄力跳台', 46, 76);
+    ctx.font = `600 36px ${FONT}`;
+    ctx.fillStyle = '#9fb0d6';
+    ctx.fillText(theme ? `· ${theme.name}` : '', 330, 82);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#f5b941';
     ctx.font = `800 96px ${FONT}`;
@@ -405,7 +483,7 @@ function drawPanel() {
 }
 function setStatus(t) { statusText = t; drawPanel(); }
 
-// 把平台放到你面前：高度 = 你站直时的头高 - TABLE_DROP
+// 把小场景放到你面前：高度 = 你站直时的头高 - TABLE_DROP
 let placeAfter = -1;
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
@@ -413,6 +491,7 @@ function placeInFront() {
   const standY = app.presenting ? Math.max(standHeight(), head.y) : 1.6;
   rig.position.set(head.x + f.x * TABLE_AHEAD, THREE.MathUtils.clamp(standY - TABLE_DROP, 0.5, 1.3), head.z + f.z * TABLE_AHEAD);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
+  base?.fit(rig.position.y);
   sfx.click();
 }
 
@@ -445,7 +524,9 @@ function updateCrouch(headY, dt) {
 // ================= 每一帧 =================
 const tmpHead = new THREE.Vector3();
 function onFrame(dt) {
+  uTime.value += dt;
   envs.update(dt);
+  if (!theme) return;
 
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeInFront(); }
@@ -463,31 +544,41 @@ function onFrame(dt) {
     chargeT += dt;
     setCharge(chargeT / TRIGGER_FULL);
   }
-  if (state === 'charging') {
-    if (Math.random() < dt * 20) app.pulseAll(0.1 + charge * 0.5, 20);
-  }
+  if (state === 'charging' && Math.random() < dt * 20) app.pulseAll(0.1 + charge * 0.5, 20);
 
-  // 蓄力时小人被压扁、平台被压下去
+  // 跳台：蓄力时被压下去，起跳/落地时弹一下；新跳台从上面落下来；旧跳台沉下去
   const squash = state === 'charging' ? charge : 0;
-  if (cur) {
-    // 平台回弹（弹簧）
-    for (const p of platforms) {
-      const targetS = p === cur ? 1 - 0.28 * squash : 1;
-      p.springV += (targetS - p.squash) * 180 * dt - p.springV * 12 * dt;
-      p.squash += p.springV * dt;
-      p.body.scale.y = p.squash;
-      p.top.position.y = (p.squash - 1) * p.h;
-      if (p.born > 0) {
-        p.born += dt;
-        const k = Math.min(p.born / 0.35, 1);
-        p.group.position.y = (1 - k) * 0.25 + Math.sin(k * Math.PI) * 0.02;
-        if (k >= 1) p.born = 0;
-      }
+  for (let i = platforms.length - 1; i >= 0; i--) {
+    const p = platforms[i];
+    const target = p === cur ? 0.035 * squash : 0;
+    // 弹簧：分成小步计算，帧率低时也不会失控
+    const steps = Math.ceil(dt / (1 / 120));
+    for (let s = 0; s < steps; s++) {
+      const h = dt / steps;
+      p.pressV += (target - p.press) * 220 * h - p.pressV * 14 * h;
+      p.press += p.pressV * h;
     }
+    let y = -p.press;
+    if (p.born > 0) {
+      p.born += dt;
+      const k = Math.min(p.born / 0.35, 1);
+      y += (1 - k) * 0.25 + Math.sin(k * Math.PI) * 0.02;
+      if (k >= 1) p.born = 0;
+    }
+    if (p.dying > 0) {
+      // 旧跳台缩小、往下沉一点，然后消失（不会掉出底座）
+      p.dying += dt;
+      const k = Math.min(p.dying / 0.6, 1);
+      y -= k * 0.04;
+      p.group.scale.setScalar(Math.max(0.001, 1 - k * k));
+      if (k >= 1) { course.remove(p.group); disposeTree(p.group); platforms.splice(i, 1); continue; }
+    }
+    p.group.position.y = y;
+    if (p.coin) p.coin.rotation.y += dt * 3;
   }
   if (state === 'idle' || state === 'charging') {
     pawn.scale.set(1 + 0.18 * squash, 1 - 0.42 * squash, 1 + 0.18 * squash);
-    pawn.position.y = cur.h * cur.squash;
+    pawn.position.y = surfaceY(cur);
   }
 
   if (state === 'jumping') {
@@ -497,32 +588,24 @@ function onFrame(dt) {
     pawn.position.x = jump.from.x + (jump.land.x - jump.from.x) * k;
     pawn.position.z = jump.from.z + (jump.land.z - jump.from.z) * k;
     pawn.position.y = THREE.MathUtils.lerp(jump.startY, jump.endY, k) + 4 * jump.peak * k * (1 - k);
-    pawn.rotation.order = 'YXZ';
     pawn.rotation.x = k * Math.PI * 2; // 空中翻一圈
     if (k >= 1) {
       if (jump.target) finishLanding();
       else startFall();
     }
   } else if (state === 'falling') {
-    const f = jump.fall;
-    f.vy -= 9.8 * dt;
-    pawn.position.addScaledVector(f.v, dt);
-    pawn.position.y += f.vy * dt;
-    pawn.rotation.x += dt * 8;
-    pawn.rotation.z += dt * 3;
-    const floorY = -rig.position.y + 0.03;
-    if (pawn.position.y <= floorY) { pawn.position.y = floorY; gameOver(); }
+    updateFall(dt);
   }
 
-  // 影子：投在小人正下方的平台上
-  const under = platforms.find((p) => contains(p, pawn.position.x, pawn.position.z));
-  shadow.visible = !!under && state !== 'over';
-  if (under) {
-    shadow.position.set(pawn.position.x, under.h * under.squash + 0.002, pawn.position.z);
-    const hgt = Math.max(0, pawn.position.y - under.h);
-    shadow.scale.setScalar(1 / (1 + hgt * 6));
-    shadow.material.opacity = 0.35 / (1 + hgt * 4);
-  }
+  // 影子：投在角色正下方的跳台上；下面没有跳台时投在水面/地面上
+  const under = platforms.find((p) => !p.dying && contains(p, pawn.position.x, pawn.position.z));
+  const groundY = theme.fall === 'water' ? 0.001 : base.floorY + 0.002;
+  const sy = under ? surfaceY(under) + 0.002 : groundY;
+  shadow.visible = pawn.visible && state !== 'over' && pawn.position.y > sy - 0.01;
+  shadow.position.set(pawn.position.x, sy, pawn.position.z);
+  const hgt = Math.max(0, pawn.position.y - sy);
+  shadow.scale.setScalar(1 / (1 + hgt * 6));
+  shadow.material.opacity = 0.35 / (1 + hgt * 4);
 
   // 蓄力圈
   chargeRing.visible = state === 'charging';
@@ -533,26 +616,27 @@ function onFrame(dt) {
     chargeRing.material.color.setHSL(0.38 - charge * 0.38, 0.9, 0.6);
   }
 
-  // 镜头跟随：平移整个平台组，让当前平台回到中间
+  // 平移跳台组，让当前跳台回到中间
   if (pan) {
     pan.t += dt / 0.5;
     const k = Math.min(pan.t, 1);
-    const e = 1 - Math.pow(1 - k, 3);
-    course.position.lerpVectors(pan.from, pan.to, e);
+    course.position.lerpVectors(pan.from, pan.to, 1 - Math.pow(1 - k, 3));
     if (k >= 1) pan = null;
   }
 
-  for (let i = popups.length - 1; i >= 0; i--) {
-    const p = popups[i];
-    p.t += dt;
-    const k = Math.min(p.t / p.life, 1);
-    p.update(k);
+  for (let i = effects.length - 1; i >= 0; i--) {
+    const e = effects[i];
+    e.t += dt;
+    const k = Math.min(e.t / e.life, 1);
+    e.update(k, e.t);
     if (k >= 1) {
-      course.remove(p.obj);
-      if (!p.obj.isSprite) p.obj.geometry?.dispose(); // 精灵共用同一个几何体，不能释放
-      p.obj.material.map?.dispose();
-      p.obj.material.dispose();
-      popups.splice(i, 1);
+      if (e.obj) {
+        course.remove(e.obj);
+        if (!e.obj.isSprite) e.obj.geometry?.dispose();
+        if (e.obj.material.map && e.obj.material.map !== glowTex) e.obj.material.map.dispose(); // 共用贴图不释放
+        e.obj.material.dispose();
+      }
+      effects.splice(i, 1);
     }
   }
 }
@@ -588,7 +672,7 @@ app.on('selectend', (c) => {
 // ================= 电脑上预览 =================
 camera.position.set(0, 1.85, 0.75);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.05, -1.05);
+controls.target.set(0, 1.0, -1.0);
 controls.enableDamping = true;
 window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && !e.repeat && !app.presenting) {
@@ -645,13 +729,11 @@ btnDesktop.addEventListener('click', () => {
   hint.style.display = 'block';
 });
 
-newGame();
-
 // 调试用
 window.jumpgame = {
   get state() { return state; }, get score() { return score; }, get combo() { return combo; },
   get cur() { return cur; }, get next() { return next; }, get pawn() { return pawn; },
-  get charge() { return charge; },
+  get charge() { return charge; }, get theme() { return themeKey; },
   startCharge, stopCharge, setCharge, newGame, updateCrouch, doJump, camera, controls, envs, rig,
   idealPower() {
     const d = Math.hypot(next.x - pawn.position.x, next.z - pawn.position.z);
