@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>口袋 VR 游乐场</title>
+  <style>
+    :root {
+      --bg: #0d1220; --card: #18213a; --card-hover: #202c4d; --text: #eef2fb;
+      --muted: #9aa6c2; --accent: #f5b941; --ok: #5cffb0; --line: #2a3658;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 960px; margin: 0 auto; padding: 48px 16px 64px; }
+    h1 { font-size: clamp(32px, 6vw, 52px); margin: 0 0 8px; letter-spacing: 0.02em; }
+    .sub { color: var(--muted); margin: 0 0 36px; font-size: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 18px; }
+    .card {
+      display: block; padding: 22px; border-radius: 18px; background: var(--card);
+      border: 1px solid var(--line); color: inherit; text-decoration: none;
+      transition: background .15s, transform .15s;
+    }
+    a.card:hover { background: var(--card-hover); transform: translateY(-2px); }
+    .card.soon { opacity: .55; }
+    .num { font-size: 14px; color: var(--muted); }
+    .card h2 { margin: 6px 0 6px; font-size: 24px; }
+    .card p { margin: 0 0 14px; color: var(--muted); }
+    .tag { display: inline-block; padding: 3px 12px; border-radius: 999px; font-size: 14px; font-weight: 700; }
+    .tag.ok { background: var(--ok); color: #0d1220; }
+    .tag.wip { background: var(--line); color: var(--muted); }
+    footer { margin-top: 40px; color: var(--muted); font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>口袋 VR 游乐场</h1>
+    <p class="sub">在你的客厅里玩的体感小游戏合集。用 Quest 浏览器打开，选一个游戏开始。</p>
+
+    <div class="grid">
+      <a class="card" href="games/minesweeper/">
+        <div class="num">01</div>
+        <h2>雷区漫步</h2>
+        <p>雷区铺在你家地板上，亲自走过去，踩一格翻一格。</p>
+        <span class="tag ok">可以玩</span>
+      </a>
+      <div class="card soon">
+        <div class="num">02</div>
+        <h2>蓄力跳台</h2>
+        <p>蹲得越低跳得越远，从一个平台跳到下一个平台。</p>
+        <span class="tag wip">制作中</span>
+      </div>
+      <div class="card soon">
+        <div class="num">03</div>
+        <h2>空中连线</h2>
+        <p>图案悬浮在你身边，用手在空中画线连起相同的两个。</p>
+        <span class="tag wip">制作中</span>
+      </div>
+      <div class="card soon">
+        <div class="num">04</div>
+        <h2>方塔消消</h2>
+        <p>绕着一座方块塔走，伸手抽出方块，凑齐三个就消除。</p>
+        <span class="tag wip">制作中</span>
+      </div>
+      <div class="card soon">
+        <div class="num">05</div>
+        <h2>大力搬箱</h2>
+        <p>箱子在你的地板上，亲手把它们推到目标点。</p>
+        <span class="tag wip">制作中</span>
+      </div>
+    </div>
+
+    <footer>玩之前请先在头显里设置好安全边界，清出大约 2×2 米的空地。</footer>
+  </main>
+</body>
+</html>
