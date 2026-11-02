@@ -102,6 +102,33 @@ export function createXRApp({ onFrame } = {}) {
       return false;
     }
   }
+  // 手柄射线（用来和地面求交点）
+  function getRay(c, target = new THREE.Ray()) {
+    rot.identity().extractRotation(c.ray.matrixWorld);
+    target.origin.setFromMatrixPosition(c.ray.matrixWorld);
+    target.direction.set(0, 0, -1).applyMatrix4(rot);
+    return target;
+  }
+
+  // ---- 安全边界（Guardian）----
+  // 浏览器通过 bounded-floor 参考空间提供边界的多边形。Quest 上通常是一个矩形，
+  // 有时会晚几秒才有数据，所以每帧都试一下，拿到后发出 'bounds' 事件（点是 [x, z]）。
+  let boundedSpace = null;
+  let bounds = null;
+  function tryReadBounds(frame) {
+    if (!boundedSpace || bounds || !frame) return;
+    const pts = boundedSpace.boundsGeometry;
+    if (!pts || pts.length < 3) return;
+    const pose = frame.getPose(boundedSpace, renderer.xr.getReferenceSpace());
+    if (!pose) return;
+    const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+    bounds = Array.from(pts).map((p) => {
+      const v = new THREE.Vector3(p.x, p.y, p.z).applyMatrix4(m);
+      return [v.x, v.z];
+    });
+    emit('bounds', bounds);
+  }
+
   async function enter(sessionMode) {
     const session = await navigator.xr.requestSession(sessionMode, {
       optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
@@ -111,10 +138,14 @@ export function createXRApp({ onFrame } = {}) {
   renderer.xr.addEventListener('sessionstart', () => {
     const s = renderer.xr.getSession();
     mode = s.environmentBlendMode && s.environmentBlendMode !== 'opaque' ? 'ar' : 'vr';
+    bounds = null;
+    boundedSpace = null;
+    s.requestReferenceSpace('bounded-floor').then((sp) => { boundedSpace = sp; }).catch(() => {});
     emit('modechange', mode);
   });
   renderer.xr.addEventListener('sessionend', () => {
     mode = 'desktop';
+    boundedSpace = null;
     emit('modechange', mode);
   });
 
@@ -136,15 +167,17 @@ export function createXRApp({ onFrame } = {}) {
   });
 
   const clock = new THREE.Clock();
-  renderer.setAnimationLoop((time) => {
+  renderer.setAnimationLoop((time, frame) => {
     const dt = Math.min(clock.getDelta(), 0.1);
+    tryReadBounds(frame);
     onFrame?.(dt, time);
     renderer.render(scene, camera);
   });
 
   return {
     renderer, scene, camera, controllers,
-    on, pulse, pulseAll, pollButtons, pointAt,
+    on, pulse, pulseAll, pollButtons, pointAt, getRay,
+    get bounds() { return bounds; },
     supports, enter, headPosition, headForward,
     get mode() { return mode; },
     get presenting() { return renderer.xr.isPresenting; },

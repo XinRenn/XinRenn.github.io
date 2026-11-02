@@ -39,17 +39,18 @@ export function makeButton(label, { width = 0.3, height = 0.1, color = '#3a5bd9'
   const p = makeCanvasPlane(width, height, 1200);
   let hover = false;
   let active = false;
+  let disabled = false;
   function draw() {
     p.redraw((ctx, w, h) => {
       roundRect(ctx, 6, 6, w - 12, h - 12, h * 0.28);
-      ctx.fillStyle = active ? '#f5b941' : color;
+      ctx.fillStyle = disabled ? '#3a3f4f' : active ? '#f5b941' : color;
       ctx.fill();
-      if (hover) {
+      if (hover && !disabled) {
         ctx.lineWidth = 10;
         ctx.strokeStyle = '#ffffff';
         ctx.stroke();
       }
-      ctx.fillStyle = active ? '#1b1b1b' : '#ffffff';
+      ctx.fillStyle = disabled ? '#8a90a0' : active ? '#1b1b1b' : '#ffffff';
       ctx.font = `700 ${Math.round(h * 0.42)}px ${FONT}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -57,7 +58,8 @@ export function makeButton(label, { width = 0.3, height = 0.1, color = '#3a5bd9'
     });
   }
   p.mesh.userData.ui = {
-    onClick,
+    onClick: () => { if (!disabled) onClick?.(); },
+    setDisabled(v) { if (v !== disabled) { disabled = v; draw(); } },
     setHover(v) { if (v !== hover) { hover = v; draw(); } },
     setActive(v) { if (v !== active) { active = v; draw(); } },
     setLabel(l) { label = l; draw(); },
