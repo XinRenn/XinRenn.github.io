@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>大力搬箱</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1220; }
+    body { font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; color: #eef2fb; }
+    canvas { display: block; }
+    #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(13, 18, 32, 0.82); z-index: 10; overflow-y: auto; }
+    #overlay.hidden { display: none; }
+    .panel { width: 100%; max-width: 580px; background: #18213a; border: 1px solid #2a3658; border-radius: 20px; padding: 28px; }
+    h1 { margin: 0 0 4px; font-size: 34px; }
+    .sub { margin: 0 0 18px; color: #9aa6c2; }
+    ol { margin: 0 0 20px; padding-left: 22px; line-height: 1.75; }
+    .choices { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 18px; }
+    .choices label { display: flex; align-items: center; gap: 8px; color: #c9d3ea; }
+    select { font: inherit; font-size: 16px; padding: 8px 12px; border-radius: 10px; background: #0f1628; color: #eef2fb; border: 1px solid #2a3658; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    button { font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 22px; cursor: pointer; color: #0d1220; background: #5cffb0; }
+    button.secondary { background: #2a3658; color: #eef2fb; }
+    button[hidden] { display: none; }
+    .note { font-size: 14px; color: #9aa6c2; margin: 0; }
+    a { color: #f5b941; }
+    #back { position: fixed; top: 12px; left: 12px; z-index: 5; font-size: 15px; }
+    #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; font-size: 15px; color: #c9d3ea; background: rgba(13,18,32,0.7); padding: 8px 14px; border-radius: 10px; display: none; white-space: nowrap; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <a id="back" href="../../">← 返回大厅</a>
+  <div id="hint">方向键 / WASD 走 · Z 撤销 · R 重来 · H 提示 · 也可以点相邻的格子</div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>大力搬箱</h1>
+      <p class="sub">关卡按真实尺寸铺在你的地板上，用身体把木箱推到黄色圆圈里。</p>
+      <ol>
+        <li>进入后关卡会铺在你脚下，<b>绿色圆圈</b>就是你现在的位置，每格约 45 厘米。</li>
+        <li><b>走进相邻的一格</b>就是走一步；如果那一格有箱子，箱子会被你推到下一格。箱子后面是墙或别的箱子就推不动（手柄会震）。</li>
+        <li>只能推、不能拉。箱子推进角落就出不来了，推错了按 <b>A / X 撤销</b>。</li>
+        <li>不方便走动（或者坐着玩）：<b>推摇杆</b>往那个方向走一步，或者用射线<b>点紧挨着你的格子</b>。</li>
+        <li>所有箱子到位就过关。前 7 关是手写的原创关卡，之后是<b>随机关卡</b>（都保证有解）。卡住了可以点<b>提示</b>。按 <b>B / Y</b> 把关卡重新铺到你脚下。</li>
+      </ol>
+      <div class="choices">
+        <label>关卡 <select id="level-select"></select></label>
+        <label>背景 <select id="env-select"></select></label>
+      </div>
+      <div class="buttons">
+        <button id="enter-vr" hidden>进入 VR</button>
+        <button id="enter-ar" hidden>进入混合现实</button>
+        <button id="desktop" class="secondary">在电脑上预览</button>
+      </div>
+      <p class="note" id="note">墙和箱子都是虚拟的，身体可以穿过去。请先清出约 2.5×2.5 米的空地并设置好安全边界。</p>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

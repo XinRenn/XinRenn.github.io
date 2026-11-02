@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>方塔消消</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1220; }
+    body { font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; color: #eef2fb; }
+    canvas { display: block; }
+    #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(13, 18, 32, 0.82); z-index: 10; overflow-y: auto; }
+    #overlay.hidden { display: none; }
+    .panel { width: 100%; max-width: 580px; background: #18213a; border: 1px solid #2a3658; border-radius: 20px; padding: 28px; }
+    h1 { margin: 0 0 4px; font-size: 34px; }
+    .sub { margin: 0 0 18px; color: #9aa6c2; }
+    ol { margin: 0 0 20px; padding-left: 22px; line-height: 1.75; }
+    .choices { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 18px; }
+    .choices label { display: flex; align-items: center; gap: 8px; color: #c9d3ea; }
+    select { font: inherit; font-size: 16px; padding: 8px 12px; border-radius: 10px; background: #0f1628; color: #eef2fb; border: 1px solid #2a3658; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    button { font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 22px; cursor: pointer; color: #0d1220; background: #5cffb0; }
+    button.secondary { background: #2a3658; color: #eef2fb; }
+    button[hidden] { display: none; }
+    .note { font-size: 14px; color: #9aa6c2; margin: 0; }
+    a { color: #f5b941; }
+    #back { position: fixed; top: 12px; left: 12px; z-index: 5; font-size: 15px; }
+    #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; font-size: 15px; color: #c9d3ea; background: rgba(13,18,32,0.7); padding: 8px 14px; border-radius: 10px; display: none; white-space: nowrap; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <a id="back" href="../../">← 返回大厅</a>
+  <div id="hint">点亮着的方块把它收进槽里 · 拖动转视角</div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>方塔消消</h1>
+      <p class="sub">一座图案方块堆成的塔立在你面前，绕着它走，把方块一块块抽出来。</p>
+      <ol>
+        <li>只有<b>亮着的方块</b>能拿：上面没有压着别的方块，而且<b>至少有一侧是空的</b>（所以要绕着塔从四面找）。暗的拿不了。</li>
+        <li>用手柄尖端碰到方块按<b>扳机</b>，或者用射线点它，方块会飞进你手边的<b>7 格收集槽</b>。</li>
+        <li>槽里凑齐 <b>3 个相同</b>的就消掉。槽满 7 格还没消掉就输了。</li>
+        <li>每局可以各用一次：<b>撤销</b>（退回上一块）、<b>洗牌</b>（打乱塔上的图案）、<b>移出 3 块</b>（把槽里前 3 块放到塔边的小台子上，之后再拿）。</li>
+        <li>每一关都保证有解。按 <b>A / X</b> 重新开始，按 <b>B / Y</b> 把塔移到你面前。</li>
+      </ol>
+      <div class="choices">
+        <label>难度 <select id="diff-select"><option value="easy">简单（27 块）</option><option value="normal">普通（54 块）</option><option value="hard">困难（90 块）</option></select></label>
+        <label>背景 <select id="env-select"></select></label>
+      </div>
+      <div class="buttons">
+        <button id="enter-vr" hidden>进入 VR</button>
+        <button id="enter-ar" hidden>进入混合现实</button>
+        <button id="desktop" class="secondary">在电脑上预览</button>
+      </div>
+      <p class="note" id="note">塔会出现在你面前大约 1 米的地方，绕着走之前先确认周围空出来了。</p>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
