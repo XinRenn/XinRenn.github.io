@@ -4,15 +4,15 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio } from '../../shared/sfx.js';
-import { createNatureEnv } from '../../shared/nature-env.js';
+import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import * as G from '../../shared/geometry2d.js';
 
 // ================= 可调参数 =================
 // size：石板之间的平均间距（米）；density：多少比例的石板下面有雷
 const PRESETS = {
-  easy:   { label: '简单', size: 0.44, density: 0.14 },
-  normal: { label: '普通', size: 0.37, density: 0.18 },
-  hard:   { label: '困难', size: 0.32, density: 0.22 },
+  easy:   { label: '简单', size: 0.44, square: 0.5, density: 0.14 },
+  normal: { label: '普通', size: 0.37, square: 0.4, density: 0.18 },
+  hard:   { label: '困难', size: 0.32, square: 0.33, density: 0.22 },
 };
 const LAYOUTS = {
   guardian: '安全边界',
@@ -33,14 +33,22 @@ const NUM_COLORS = ['', '#5aa9ff', '#5fe07a', '#ff6b6b', '#c891ff', '#ffb547', '
 const app = createXRApp({ onFrame });
 const { scene, camera, renderer } = app;
 
-const nature = createNatureEnv({ clearRadius: 4 });
-scene.add(nature.group, ...nature.lights);
-scene.fog = nature.fog;
+// 背景场景（可以在面板或开始页面切换，会记住上次的选择）
+const envs = createEnvManager(scene, {
+  onChange: (def) => {
+    envButton?.userData.ui.setLabel(`背景：${def.label} ▶`);
+    if (envSelect) envSelect.value = def.key;
+  },
+});
+envs.set(savedEnvKey());
+
+const SHAPES = { voronoi: '格子：不规则石板', square: '格子：方格' };
+function loadPref(k, d) { try { return localStorage.getItem(k) || d; } catch (_) { return d; } }
+function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
+let tileShape = SHAPES[loadPref('minewalk-shape', 'voronoi')] ? loadPref('minewalk-shape', 'voronoi') : 'voronoi';
 
 app.on('modechange', (mode) => {
-  const ar = mode === 'ar';
-  nature.group.visible = !ar;
-  scene.fog = ar ? null : nature.fog;
+  envs.setAR(mode === 'ar');
   overlay.classList.toggle('hidden', mode !== 'desktop' || desktopPreview);
   backLink.style.display = mode === 'desktop' ? '' : 'none';
   if (mode !== 'desktop') {
@@ -187,14 +195,14 @@ let drawPointerHit = null;
 
 let panel, panelGroup, statusText = '';
 let difficultyButtons = {}, layoutButtons = {}, uiButtons = [];
-let restartButton, secondaryButton;
+let restartButton, secondaryButton, shapeButton, envButton;
 let progressDisc;
 
 function loadBest(key) {
-  try { return Number(localStorage.getItem(`minewalk2-best-${key}-${layoutSource}`)) || 0; } catch (_) { return 0; }
+  try { return Number(localStorage.getItem(`minewalk2-best-${key}-${layoutSource}-${tileShape}`)) || 0; } catch (_) { return 0; }
 }
 function saveBest(key, ms) {
-  try { localStorage.setItem(`minewalk2-best-${key}-${layoutSource}`, String(ms)); } catch (_) { /* 无痕模式下存不了 */ }
+  try { localStorage.setItem(`minewalk2-best-${key}-${layoutSource}-${tileShape}`, String(ms)); } catch (_) { /* 无痕模式下存不了 */ }
 }
 
 function disposeTree(obj) {
@@ -219,7 +227,7 @@ function buildBoard() {
   boardContent.clear();
   boundary = G.ensureCCW(currentBoundary());
 
-  const geoCells = G.makeCells(boundary, cfg.size);
+  const geoCells = tileShape === 'square' ? G.makeGridCells(boundary, cfg.square) : G.makeCells(boundary, cfg.size);
   cells = geoCells.map((gc, i) => {
     const center = G.centroid(gc.poly);
     const slab = makeSlab(gc.poly, center);
@@ -315,6 +323,12 @@ function buildPanel() {
     layoutButtons[key] = b;
     uiButtons.push(b);
   });
+  shapeButton = makeButton(SHAPES[tileShape], { width: 0.56, height: 0.1, color: '#5a4a2e', onClick: () => setTileShape(tileShape === 'square' ? 'voronoi' : 'square') });
+  shapeButton.position.set(-0.3, -0.68, 0);
+  envButton = makeButton(`背景：${envs.label || '…'} ▶`, { width: 0.56, height: 0.1, color: '#5a4a2e', onClick: () => envs.next() });
+  envButton.position.set(0.3, -0.68, 0);
+  panelGroup.add(shapeButton, envButton);
+  uiButtons.push(shapeButton, envButton);
   refreshButtons();
   drawPanel();
 }
@@ -543,6 +557,14 @@ function newGame(key = presetKey) {
   }
   buildBoard();
   sfx.click();
+}
+
+function setTileShape(shape) {
+  tileShape = shape;
+  savePref('minewalk-shape', shape);
+  if (shapeSelect) shapeSelect.value = shape;
+  if (state === 'drawing') return;
+  newGame();
 }
 
 function useLayout(key) {
@@ -815,7 +837,7 @@ function updateTileColors() {
 }
 
 function onFrame(dt) {
-  if (nature.group.visible) nature.update(dt);
+  envs.update(dt);
   effects = effects.filter((e) => {
     const alive = e.update(dt);
     if (!alive) e.dispose?.();
@@ -912,7 +934,14 @@ const btnVR = document.getElementById('enter-vr');
 const btnAR = document.getElementById('enter-ar');
 const btnDesktop = document.getElementById('desktop');
 const note = document.getElementById('note');
+const envSelect = document.getElementById('env-select');
+const shapeSelect = document.getElementById('shape-select');
 let desktopPreview = false;
+for (const e of ENVIRONMENTS) envSelect.add(new Option(e.label, e.key));
+envSelect.value = savedEnvKey();
+envSelect.addEventListener('change', () => envs.set(envSelect.value));
+shapeSelect.value = tileShape;
+shapeSelect.addEventListener('change', () => setTileShape(shapeSelect.value));
 
 (async () => {
   const [vr, ar] = await Promise.all([app.supports('immersive-vr'), app.supports('immersive-ar')]);
@@ -946,5 +975,5 @@ window.minewalk = {
   get layout() { return layoutSource; }, get mineTotal() { return mineTotal; },
   board, newGame, reveal, toggleFlag, updateStanding, useLayout, addDrawPoint, finishDrawing,
   setGuardian(pts) { guardianPoly = G.safeInset(pts, GUARDIAN_INSET); refreshLayoutButtons(); },
-  camera, controls,
+  camera, controls, envs, setTileShape,
 };

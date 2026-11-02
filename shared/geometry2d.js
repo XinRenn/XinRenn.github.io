@@ -196,6 +196,50 @@ export function voronoi(sites, boundary) {
   return cells;
 }
 
+// 正方形格子：网格方向和场地最长的一条边对齐，边缘的格子按场地形状裁掉，
+// 太碎的（不到半格）丢掉。相邻 = 周围 8 格（和经典扫雷一样）。
+export function makeGridCells(boundary, size) {
+  const poly = ensureCCW(boundary);
+  let best = 0, angle = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const len = dist(a, b);
+    if (len > best) { best = len; angle = Math.atan2(b[1] - a[1], b[0] - a[0]); }
+  }
+  const cos = Math.cos(-angle), sin = Math.sin(-angle);
+  const rot = (p, c, s) => [p[0] * c - p[1] * s, p[0] * s + p[1] * c];
+  const local = poly.map((p) => rot(p, cos, sin));
+  const b = bbox(local);
+  const cols = Math.max(1, Math.round((b.maxX - b.minX) / size));
+  const rows = Math.max(1, Math.round((b.maxZ - b.minZ) / size));
+  const sx = (b.maxX - b.minX) / cols, sz = (b.maxZ - b.minZ) / rows; // 把格子微调到刚好铺满
+  const grid = new Map();
+  const cells = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x0 = b.minX + c * sx, z0 = b.minZ + r * sz;
+      let piece = local;
+      piece = clipHalfPlane(piece, [-1, 0], -x0);
+      piece = clipHalfPlane(piece, [1, 0], x0 + sx);
+      piece = clipHalfPlane(piece, [0, -1], -z0);
+      piece = clipHalfPlane(piece, [0, 1], z0 + sz);
+      if (piece.length < 3 || area(piece) < sx * sz * 0.5) continue;
+      const world = piece.map((p) => rot(p, Math.cos(angle), Math.sin(angle)));
+      grid.set(`${c},${r}`, cells.length);
+      cells.push({ site: centroid(world), poly: world, c, r });
+    }
+  }
+  cells.forEach((cell) => {
+    cell.neighbors = new Set();
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+      if (!dr && !dc) continue;
+      const j = grid.get(`${cell.c + dc},${cell.r + dr}`);
+      if (j !== undefined) cell.neighbors.add(j);
+    }
+  });
+  return cells;
+}
+
 // 在场地里撒点（点和点至少隔 size 米），再做几轮 Lloyd 松弛让格子大小均匀
 export function makeCells(boundary, size, rand = Math.random) {
   const poly = ensureCCW(boundary);

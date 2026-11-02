@@ -19,7 +19,8 @@
 ```
 index.html          大厅
 games/<游戏>/       每个游戏一个文件夹（index.html + main.js）
-shared/             公共代码：VR 设置、3D 按钮、音效
+shared/             公共代码：VR 设置、3D 按钮、音效、二维几何（石板/方格切分）
+shared/env/         背景场景：草地森林、海底世界、冬日雪地、秋日港口、峡湾、瀑布、日本街头、雨中伦敦
 .nojekyll           让 GitHub Pages 原样发布所有文件
 ```
 
