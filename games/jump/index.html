@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>蓄力跳台</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1220; }
+    body { font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; color: #eef2fb; }
+    canvas { display: block; }
+    #overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      padding: 16px; background: rgba(13, 18, 32, 0.82); z-index: 10; overflow-y: auto;
+    }
+    #overlay.hidden { display: none; }
+    .panel { width: 100%; max-width: 560px; background: #18213a; border: 1px solid #2a3658; border-radius: 20px; padding: 28px; }
+    h1 { margin: 0 0 4px; font-size: 34px; }
+    .sub { margin: 0 0 18px; color: #9aa6c2; }
+    ol { margin: 0 0 20px; padding-left: 22px; line-height: 1.75; }
+    .choices { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 18px; }
+    .choices label { display: flex; align-items: center; gap: 8px; color: #c9d3ea; }
+    select { font: inherit; font-size: 16px; padding: 8px 12px; border-radius: 10px; background: #0f1628; color: #eef2fb; border: 1px solid #2a3658; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    button { font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 22px; cursor: pointer; color: #0d1220; background: #5cffb0; }
+    button.secondary { background: #2a3658; color: #eef2fb; }
+    button[hidden] { display: none; }
+    .note { font-size: 14px; color: #9aa6c2; margin: 0; }
+    a { color: #f5b941; }
+    #back { position: fixed; top: 12px; left: 12px; z-index: 5; font-size: 15px; }
+    #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; font-size: 15px; color: #c9d3ea; background: rgba(13,18,32,0.7); padding: 8px 14px; border-radius: 10px; display: none; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <a id="back" href="../../">← 返回大厅</a>
+  <div id="hint">按住空格键蓄力，松开起跳 · 拖动鼠标转视角</div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>蓄力跳台</h1>
+      <p class="sub">你就是弹簧。蹲得越低，小人跳得越远。</p>
+      <ol>
+        <li>一排小平台悬浮在你面前，小人站在其中一块上。</li>
+        <li><b>先站直</b>，然后<b>蹲下蓄力</b>，蹲得越低跳得越远；<b>站起来</b>小人就起跳。</li>
+        <li>不想蹲也可以<b>按住扳机</b>蓄力，按得越久跳得越远，松开起跳（坐着也能玩）。</li>
+        <li>落在下一块平台上 +1；正中靶心有额外加分，连续命中靶心分数越来越高；金色平台再 +5。</li>
+        <li>按 <b>A / X</b> 重新开始，按 <b>B / Y</b> 把平台移到你面前（高度会跟着你调整）。</li>
+      </ol>
+      <div class="choices">
+        <label>背景 <select id="env-select"></select></label>
+      </div>
+      <div class="buttons">
+        <button id="enter-vr" hidden>进入 VR</button>
+        <button id="enter-ar" hidden>进入混合现实</button>
+        <button id="desktop" class="secondary">在电脑上预览</button>
+      </div>
+      <p class="note" id="note">蹲下时注意身边有没有东西，站稳了再蹲。</p>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

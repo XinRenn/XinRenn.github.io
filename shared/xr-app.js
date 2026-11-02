@@ -54,6 +54,7 @@ export function createXRApp({ onFrame } = {}) {
       dot.visible = false;
     });
     ray.addEventListener('selectstart', () => emit('select', c));
+    ray.addEventListener('selectend', () => emit('selectend', c));
     scene.add(ray, grip);
     controllers.push(c);
   }

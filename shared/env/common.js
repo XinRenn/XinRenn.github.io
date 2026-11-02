@@ -54,7 +54,7 @@ export function createBuilder(seed = 7) {
 
 export function disposeTree(obj) {
   obj.traverse((o) => {
-    o.geometry?.dispose();
+    if (!o.isSprite) o.geometry?.dispose(); // 精灵共用一个几何体
     const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
     for (const m of mats) {
       for (const k of ['map', 'alphaMap', 'emissiveMap']) m[k]?.dispose?.();

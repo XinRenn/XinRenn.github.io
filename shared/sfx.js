@@ -50,7 +50,45 @@ function noise({ dur = 1, vol = 0.8, cutoff = 1200, delay = 0 }) {
   src.start(t0);
 }
 
+// 持续的蓄力音：音调随 level(0~1) 升高。返回 { set(level), stop() }
+export function chargeTone() {
+  if (!ctx) return { set() {}, stop() {} };
+  const o = ctx.createOscillator();
+  const o2 = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.type = 'triangle';
+  o2.type = 'sine';
+  o.frequency.value = 180;
+  o2.frequency.value = 360;
+  g.gain.value = 0.0001;
+  g.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.05);
+  o.connect(g); o2.connect(g); g.connect(master);
+  o.start(); o2.start();
+  let stopped = false;
+  return {
+    set(level) {
+      if (stopped) return;
+      const f = 180 + level * 520;
+      o.frequency.setTargetAtTime(f, ctx.currentTime, 0.03);
+      o2.frequency.setTargetAtTime(f * 2.01, ctx.currentTime, 0.03);
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      g.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.03);
+      o.stop(ctx.currentTime + 0.2);
+      o2.stop(ctx.currentTime + 0.2);
+    },
+  };
+}
+
 export const sfx = {
+  jump: () => tone({ freq: 300, to: 700, dur: 0.18, type: 'square', vol: 0.07 }),
+  land: () => { tone({ freq: 140, to: 90, dur: 0.12, vol: 0.35 }); tone({ freq: 500, dur: 0.06, type: 'triangle', vol: 0.08 }); },
+  perfect: (n = 1) => [660, 880, 1320].slice(0, 1 + Math.min(2, n)).forEach((f, i) => tone({ freq: f, dur: 0.18, type: 'triangle', vol: 0.16, delay: i * 0.07 })),
+  bonus: () => [784, 988, 1175, 1568].forEach((f, i) => tone({ freq: f, dur: 0.16, type: 'sine', vol: 0.15, delay: i * 0.06 })),
+  fall: () => tone({ freq: 700, to: 120, dur: 0.9, type: 'sine', vol: 0.18 }),
+  thud: () => noise({ dur: 0.3, vol: 0.4, cutoff: 600 }),
   tick: () => tone({ freq: 880, dur: 0.05, type: 'square', vol: 0.05 }),
   reveal: (big) => {
     tone({ freq: 520, to: 780, dur: 0.12, type: 'triangle', vol: 0.2 });

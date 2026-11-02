@@ -207,7 +207,7 @@ function saveBest(key, ms) {
 
 function disposeTree(obj) {
   obj.traverse((o) => {
-    if (o.geometry && o.geometry !== discGeo) o.geometry.dispose();
+    if (o.geometry && o.geometry !== discGeo && !o.isSprite) o.geometry.dispose();
     if (o.material) {
       if (o.material.map && !Object.values(numTexCache).includes(o.material.map)) o.material.map.dispose();
       o.material.dispose();
