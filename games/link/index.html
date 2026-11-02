@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>空中连线</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1220; }
+    body { font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; color: #eef2fb; }
+    canvas { display: block; }
+    #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(13, 18, 32, 0.82); z-index: 10; overflow-y: auto; }
+    #overlay.hidden { display: none; }
+    .panel { width: 100%; max-width: 580px; background: #18213a; border: 1px solid #2a3658; border-radius: 20px; padding: 28px; }
+    h1 { margin: 0 0 4px; font-size: 34px; }
+    .sub { margin: 0 0 18px; color: #9aa6c2; }
+    ol { margin: 0 0 20px; padding-left: 22px; line-height: 1.75; }
+    .choices { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 18px; }
+    .choices label { display: flex; align-items: center; gap: 8px; color: #c9d3ea; }
+    select { font: inherit; font-size: 16px; padding: 8px 12px; border-radius: 10px; background: #0f1628; color: #eef2fb; border: 1px solid #2a3658; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    button { font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 22px; cursor: pointer; color: #0d1220; background: #5cffb0; }
+    button.secondary { background: #2a3658; color: #eef2fb; }
+    button[hidden] { display: none; }
+    .note { font-size: 14px; color: #9aa6c2; margin: 0; }
+    a { color: #f5b941; }
+    #back { position: fixed; top: 12px; left: 12px; z-index: 5; font-size: 15px; }
+    #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; font-size: 15px; color: #c9d3ea; background: rgba(13,18,32,0.7); padding: 8px 14px; border-radius: 10px; display: none; white-space: nowrap; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <a id="back" href="../../">← 返回大厅</a>
+  <div id="hint">点两个相同的方块连线 · 方向键转立方体 · H 键提示 · 拖动转视角</div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>空中连线</h1>
+      <p class="sub">图案方块堆成一个立方体悬在你面前，把相同的两个连起来。</p>
+      <ol>
+        <li><b>用手画线</b>：用手柄尖端（白色小光点）碰一个方块，光点变绿时<b>按住扳机</b>，在空中把线拉到相同图案的方块上。</li>
+        <li>线<b>不能碰到别的方块</b>，碰到就断了。绕过去、从缝里穿过去都行。</li>
+        <li><b>用射线点</b>：远处或者手够不着的，用射线依次点两个相同的方块，按经典规则（空位里最多拐两个弯）自动连上。</li>
+        <li><b>按住握把</b>可以抓住整个立方体转动，去够背面的方块。困难模式里面还藏着一层。</li>
+        <li>4 秒内接着连上下一对算连击，分数翻倍增加。卡住了可以点面板上的<b>提示</b>或<b>洗牌</b>。</li>
+      </ol>
+      <div class="choices">
+        <label>难度 <select id="diff-select"><option value="easy">简单（24 块）</option><option value="normal">普通（48 块）</option><option value="hard">困难（72 块）</option></select></label>
+        <label>背景 <select id="env-select"></select></label>
+      </div>
+      <div class="buttons">
+        <button id="enter-vr" hidden>进入 VR</button>
+        <button id="enter-ar" hidden>进入混合现实</button>
+        <button id="desktop" class="secondary">在电脑上预览</button>
+      </div>
+      <p class="note" id="note">立方体会出现在你面前一臂远的地方，伸手前看看周围有没有东西。</p>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
