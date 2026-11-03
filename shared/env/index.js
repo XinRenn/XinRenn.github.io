@@ -41,7 +41,8 @@ export function createEnvManager(scene, { onChange } = {}) {
     if (my !== token) return; // 加载期间又切换了别的
     const env = mod.create();
     if (current) {
-      scene.remove(current.group, ...current.lights);
+      current.group.removeFromParent(); // 游戏可能把背景挪到了别的父节点下
+      scene.remove(...current.lights);
       current.dispose();
     }
     current = env;

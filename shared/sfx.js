@@ -82,7 +82,35 @@ export function chargeTone() {
   };
 }
 
+// 青蛙叫：低沉的锯齿波 + 快速的音量抖动（“呱——呱”）
+function croakOnce(delay = 0, pitch = 1) {
+  if (!ctx) return;
+  const t0 = ctx.currentTime + delay;
+  const o = ctx.createOscillator();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(150 * pitch, t0);
+  o.frequency.linearRampToValueAtTime(115 * pitch, t0 + 0.2);
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 700 * pitch;
+  bp.Q.value = 3;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(0.5, t0 + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+  // 每秒 32 次的颤动，让声音“咕噜咕噜”
+  const lfo = ctx.createOscillator();
+  const lg = ctx.createGain();
+  lfo.frequency.value = 32;
+  lg.gain.value = 0.35;
+  lfo.connect(lg).connect(g.gain);
+  o.connect(bp).connect(g).connect(master);
+  o.start(t0); lfo.start(t0);
+  o.stop(t0 + 0.25); lfo.stop(t0 + 0.25);
+}
+
 export const sfx = {
+  croak: (pitch = 1) => { croakOnce(0, pitch); croakOnce(0.27, pitch * 0.96); },
   jump: () => tone({ freq: 300, to: 700, dur: 0.18, type: 'square', vol: 0.07 }),
   land: () => { tone({ freq: 140, to: 90, dur: 0.12, vol: 0.35 }); tone({ freq: 500, dur: 0.06, type: 'triangle', vol: 0.08 }); },
   perfect: (n = 1) => [660, 880, 1320].slice(0, 1 + Math.min(2, n)).forEach((f, i) => tone({ freq: f, dur: 0.18, type: 'triangle', vol: 0.16, delay: i * 0.07 })),
