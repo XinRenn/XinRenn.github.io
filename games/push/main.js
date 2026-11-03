@@ -7,12 +7,15 @@ import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { makePawn } from '../jump/themes.js';
 import { HANDMADE, parse, step, solved, solve, generate, DIRS } from './levels.js';
+import { createFeet } from '../../shared/feet.js';
 
 // ================= 可调参数 =================
 const CELL = 0.45;        // 每格边长（米）
-const BOX = 0.38;         // 箱子边长
-const WALL_H = 0.4;       // 墙高（矮墙，能看见对面）
-const ENTER = 0.36;       // 头部投影离格子中心多近（以格为单位）才算走进这一格（防抖）
+const BOX = 0.4;          // 箱子边长（底面）
+const BOX_H = 0.85;       // 箱子高度：差不多到腰，有用手推的感觉
+const WALL_H = 0.55;      // 墙高
+const ENTER = 0.42;       // 头部投影离格子中心多近（以格为单位）才算走进这一格（防抖）
+const MAX_CATCHUP = 5;    // 走得快时一帧里最多补走几步
 const STICK_ON = 0.7, STICK_OFF = 0.3; // 摇杆推到多少算走一步
 
 // ================= 场景 =================
@@ -58,6 +61,14 @@ const crateTex = canvasTex(128, 128, (g, w, h) => {
   g.strokeStyle = '#6b4220'; g.lineWidth = 12; g.strokeRect(6, 6, w - 12, h - 12);
   g.lineWidth = 9; g.beginPath(); g.moveTo(10, 10); g.lineTo(w - 10, h - 10); g.stroke();
 });
+const crateSideTex = canvasTex(128, 256, (g, w, h) => {
+  for (const y0 of [0, 128]) {
+    g.fillStyle = '#b07a42'; g.fillRect(0, y0, w, 128);
+    for (let y = 0; y < 128; y += 32) { g.fillStyle = 'rgba(70,40,15,0.7)'; g.fillRect(0, y0 + y, w, 3); }
+    g.strokeStyle = '#6b4220'; g.lineWidth = 12; g.strokeRect(6, y0 + 6, w - 12, 116);
+    g.lineWidth = 9; g.beginPath(); g.moveTo(10, y0 + 10); g.lineTo(w - 10, y0 + 118); g.stroke();
+  }
+});
 const tileTex = canvasTex(128, 128, (g, w, h) => {
   g.fillStyle = '#cfc6b4'; g.fillRect(0, 0, w, h);
   for (let i = 0; i < 300; i++) { g.fillStyle = `rgba(90,80,60,${Math.random() * 0.12})`; g.fillRect(Math.random() * w, Math.random() * h, 3, 3); }
@@ -97,6 +108,9 @@ const avatar = makePawn('runner');
 avatar.scale.setScalar(4.2);
 avatar.traverse((o) => { if (o.material) { o.material = o.material.clone(); o.material.transparent = true; } });
 rig.add(avatar);
+// 卡通脚：看得见自己踩在哪一格
+const feet = createFeet({ color: '#3a86ff', accent: '#ffd166' });
+scene.add(feet.object);
 const youRing = new THREE.Mesh(
   new THREE.RingGeometry(CELL * 0.36, CELL * 0.44, 48),
   new THREE.MeshBasicMaterial({ color: '#5cffb0', transparent: true, opacity: 0.8, depthWrite: false })
@@ -195,10 +209,13 @@ function buildLevel() {
     levelGroup.add(g, dot);
     goalMeshes.push(g);
   }
-  const boxGeo = new THREE.BoxGeometry(BOX, BOX, BOX);
+  const boxGeo = new THREE.BoxGeometry(BOX, BOX_H, BOX);
   st.boxes.forEach((k, i) => {
-    const m = new THREE.Mesh(boxGeo, new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.75, emissive: '#000000' }));
-    m.position.copy(cellLocal(k, BOX / 2 + 0.02));
+    // 侧面贴两层箱子的图案，顶面一层
+    const side = new THREE.MeshStandardMaterial({ map: crateSideTex, roughness: 0.75, emissive: '#000000' });
+    const top = new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.75, emissive: '#000000' });
+    const m = new THREE.Mesh(boxGeo, [side, side, top, top, side, side]);
+    m.position.copy(cellLocal(k, BOX_H / 2 + 0.02));
     m.userData.cell = k;
     m.userData.box = i;
     levelGroup.add(m);
@@ -216,9 +233,8 @@ function refreshBoxes(silent = false) {
     const m = boxMeshes[i];
     const was = m.userData.on;
     m.userData.on = on;
-    m.material.emissive.set(on ? '#7a5a00' : '#000000');
-    m.material.color.set(on ? '#ffe08a' : '#ffffff');
-    if (on && !was && !silent) { sfx.perfect(1); sparkle(rig.localToWorld(cellLocal(k, BOX))); }
+    for (const mt of m.material) { mt.emissive.set(on ? '#7a5a00' : '#000000'); mt.color.set(on ? '#ffe08a' : '#ffffff'); }
+    if (on && !was && !silent) { sfx.perfect(1); sparkle(rig.localToWorld(cellLocal(k, BOX_H))); }
   });
 }
 
@@ -442,6 +458,7 @@ function onFrame(dt) {
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeLevel(false); }
     updateBody();
+    feet.update(app.headPosition(tmpHead), app.headForward(new THREE.Vector3()), 0.022, dt);
     updatePointers();
     app.pollButtons((c, bi) => {
       if (bi === 4) undo();
@@ -457,21 +474,22 @@ function onFrame(dt) {
       if (mag < STICK_OFF) stickPrev[n] = false;
     });
   } else {
+    feet.hide();
     controls.update();
   }
 
   // 箱子和小人平滑移动
   boxMeshes.forEach((m) => {
-    const target = cellLocal(m.userData.cell, BOX / 2 + 0.02);
+    const target = cellLocal(m.userData.cell, BOX_H / 2 + 0.02);
     m.position.lerp(target, Math.min(1, dt * 14));
     if (m.userData.flash > 0) {
       m.userData.flash -= dt;
-      m.material.emissive.set(Math.sin(performance.now() / 40) > 0 ? '#aa1111' : '#000000');
+      for (const mt of m.material) mt.emissive.set(Math.sin(performance.now() / 40) > 0 ? '#aa1111' : '#000000');
       if (m.userData.flash <= 0) refreshBoxes(true);
     }
   });
   const ap = cellLocal(st.player, 0.02);
-  avatar.position.lerp(ap, Math.min(1, dt * 12));
+  avatar.position.lerp(ap, Math.min(1, dt * 20));
   youRing.position.set(ap.x, 0.025, ap.z);
   youRing.material.opacity = 0.55 + 0.35 * Math.sin(performance.now() / 250);
   // 你本人站在小人那一格时，小人变透明（不挡你看脚下）
@@ -494,7 +512,9 @@ function onFrame(dt) {
   }
 }
 
-// 头部在地面的投影 → 你在哪一格。走进相邻的一格 = 往那边走一步（可能推动箱子）
+// 头部在地面的投影 → 你在哪一格。走得快、斜着走也没关系：
+// 小人会沿着直线一步一步追上你（每一步都按规则走，碰到箱子就推）。
+let blockedTarget = -1;
 function updateBody() {
   const local = rig.worldToLocal(app.headPosition(tmpHead).clone());
   const fx = local.x / CELL, fy = local.z / CELL;
@@ -502,17 +522,28 @@ function updateBody() {
   if (Math.hypot(fx - cx, fy - cy) > ENTER) return; // 在两格中间，先不算
   if (cx < 0 || cy < 0 || cx >= level.w || cy >= level.h) return;
   const cell = cy * level.w + cx;
-  if (cell === physCell) return;
   physCell = cell;
-  if (cell === st.player) return;
-  const px = st.player % level.w, py = Math.floor(st.player / level.w);
-  const dx = cx - px, dy = cy - py;
-  if (Math.abs(dx) + Math.abs(dy) !== 1) {
-    setStatus('回到绿色圆圈，再一格一格走');
-    return;
+  if (cell === st.player) { blockedTarget = -1; return; }
+  if (cell === blockedTarget) return; // 刚才这里推不动，等你换个地方再试
+  for (let n = 0; n < MAX_CATCHUP && st.player !== cell && state === 'playing'; n++) {
+    const px = st.player % level.w, py = Math.floor(st.player / level.w);
+    const dx = cx - px, dy = cy - py;
+    const tryX = dx !== 0 ? (dx > 0 ? 'right' : 'left') : null;
+    const tryY = dy !== 0 ? (dy > 0 ? 'down' : 'up') : null;
+    // 先走差得多的那个方向，走不通再试另一个
+    const order = Math.abs(dx) >= Math.abs(dy) ? [tryX, tryY] : [tryY, tryX];
+    let moved = false;
+    for (const d of order) {
+      if (!d) continue;
+      if (step(level, st, d)) { move(d, 'body'); moved = true; break; }
+    }
+    if (!moved) {
+      blocked(order.find(Boolean));
+      blockedTarget = cell;
+      setStatus('这边走不过去：回到绿色圆圈，换条路');
+      break;
+    }
   }
-  const dir = dx === 1 ? 'right' : dx === -1 ? 'left' : dy === 1 ? 'down' : 'up';
-  move(dir, 'body');
 }
 
 // 把摇杆方向（相对你面对的方向）换成关卡里的上下左右

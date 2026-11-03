@@ -132,12 +132,31 @@ export function createXRApp({ onFrame } = {}) {
     emit('bounds', bounds);
   }
 
+  // 进入时优先用 bounded-floor（以安全边界为基准的坐标系）：长按 Home 键重新居中时它不会变，
+  // 场地就一直固定在房间里原来的位置。不支持时退回 local-floor，并在“重置”事件里把场景反向挪回去。
   async function enter(sessionMode) {
     const session = await navigator.xr.requestSession(sessionMode, {
       optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
     });
+    let type = 'local-floor';
+    try {
+      await session.requestReferenceSpace('bounded-floor');
+      type = 'bounded-floor';
+    } catch (_) { /* 没有安全边界（比如原地模式），用 local-floor */ }
+    renderer.xr.setReferenceSpaceType(type);
     await renderer.xr.setSession(session);
+    referenceType = type;
+    const space = renderer.xr.getReferenceSpace();
+    space?.addEventListener?.('reset', (e) => {
+      // transform = 新原点在旧坐标系里的位置；把场景里的东西乘上它的逆，就回到房间里原来的地方
+      if (e.transform) {
+        const inv = new THREE.Matrix4().fromArray(e.transform.matrix).invert();
+        for (const o of scene.children) if (o !== camera && !o.userData.headLocked) o.applyMatrix4(inv);
+      }
+      emit('recenter', !!e.transform);
+    });
   }
+  let referenceType = 'local-floor';
   renderer.xr.addEventListener('sessionstart', () => {
     const s = renderer.xr.getSession();
     mode = s.environmentBlendMode && s.environmentBlendMode !== 'opaque' ? 'ar' : 'vr';
@@ -183,6 +202,7 @@ export function createXRApp({ onFrame } = {}) {
     get bounds() { return bounds; },
     supports, enter, headPosition, headForward,
     get mode() { return mode; },
+    get referenceType() { return referenceType; },
     get presenting() { return renderer.xr.isPresenting; },
   };
 }

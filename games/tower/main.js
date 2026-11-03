@@ -97,6 +97,12 @@ scene.add(tray);
     tray.add(slot);
   }
 }
+const trayGlow = new THREE.Mesh(
+  new THREE.BoxGeometry(TRAY_GAP * TRAY_SLOTS + 0.06, 0.02, 0.12),
+  new THREE.MeshBasicMaterial({ color: '#5cffb0', transparent: true, opacity: 0, depthWrite: false })
+);
+trayGlow.position.y = -0.045;
+tray.add(trayGlow);
 function slotX(s) { return (s - (TRAY_SLOTS - 1) / 2) * TRAY_GAP; }
 const trayPos = (s) => new THREE.Vector3(slotX(s), 0, 0);
 
@@ -194,6 +200,7 @@ function newGame(k = presetKey) {
   savePref('tower-preset', k);
   cfg = PRESETS[k];
   for (const t of tiles) t.mesh.parent?.remove(t.mesh);
+  for (const c of app.controllers) c.held = null;
   tiles = [];
   trayList = [];
   shelfList = [null, null, null];
@@ -231,13 +238,14 @@ function refreshFree() {
 function canTake(t) {
   return state === 'playing' && ((t.where === 'tower' && t.free) || t.where === 'shelf');
 }
-function take(t) {
-  if (!canTake(t)) {
+function take(t, force = false) {
+  if (!force && !canTake(t)) {
     if (state === 'playing' && t.where === 'tower') { sfx.warn(); app.pulseAll(0.5, 80); setStatus('这块被压住或者四面都被挡住了'); }
     return false;
   }
-  const from = t.where === 'shelf' ? { where: 'shelf', slot: shelfList.indexOf(t) } : { where: 'tower' };
-  if (from.where === 'shelf') shelfList[from.slot] = null;
+  const from = t.origin || (t.where === 'shelf' ? { where: 'shelf', slot: shelfList.indexOf(t) } : { where: 'tower' });
+  t.origin = null;
+  if (t.where === 'shelf') shelfList[from.slot] = null;
   t.where = 'tray';
   // 插到槽里相同图案的后面
   let at = trayList.length;
@@ -506,20 +514,33 @@ function onFrame(dt) {
   app.headPosition(headP);
   app.headForward(headF);
 
-  // 收集槽：慢慢跟到你面前偏下的位置（转身时它也跟着转过来）
-  const want = headP.clone().addScaledVector(headF, 0.42);
-  want.y = headP.y - (app.presenting ? 0.4 : 0.32);
-  const yaw = Math.atan2(-headF.x, -headF.z);
+  // 收集槽：挂在你左手边、腰的高度（像个腰包），不挡你看塔；转身时它也跟着转过来
+  const left = new THREE.Vector3(headF.z, 0, -headF.x);
+  const want = headP.clone().addScaledVector(headF, 0.24).addScaledVector(left, app.presenting ? 0.36 : 0.3);
+  want.y = headP.y - (app.presenting ? 0.62 : 0.42);
+  const yaw = Math.atan2(-headF.x, -headF.z) + 0.55; // 稍微侧过来朝着你
   if (!trayInit) { tray.position.copy(want); tray.rotation.y = yaw; trayInit = true; }
   tray.position.lerp(want, Math.min(1, dt * 4));
   let dy = yaw - tray.rotation.y;
   dy = Math.atan2(Math.sin(dy), Math.cos(dy));
   tray.rotation.y += dy * Math.min(1, dt * 4);
 
-  // 面板转向你
+  // 面板：永远在塔的旁边（从你这边看是塔的右侧），不会挡在你和塔之间；并且转向你
+  const tc = rig.localToWorld(new THREE.Vector3(0, 0, 0));
+  const toTower = tc.clone().sub(headP).setY(0);
+  if (toTower.lengthSq() > 1e-4) {
+    toTower.normalize();
+    const side = new THREE.Vector3(-toTower.z, 0, toTower.x); // 塔的右手边
+    const pwWant = tc.clone().addScaledVector(side, 0.78).addScaledVector(toTower, 0.05);
+    pwWant.y = 1.35;
+    const localWant = rig.worldToLocal(pwWant);
+    panelGroup.position.lerp(localWant, Math.min(1, dt * 3));
+  }
   const pw = panelGroup.getWorldPosition(new THREE.Vector3());
-  const rigYaw = rig.rotation.y;
-  panelGroup.rotation.y = Math.atan2(headP.x - pw.x, headP.z - pw.z) - rigYaw;
+  panelGroup.rotation.y = Math.atan2(headP.x - pw.x, headP.z - pw.z) - rig.rotation.y;
+  // 拿着方块靠近槽时，槽亮起来
+  const holding = app.controllers.find((c) => c.held && nearTray(c.held));
+  trayGlow.material.opacity = holding ? 0.55 + 0.25 * Math.sin(performance.now() / 90) : 0;
 
   // 方块飞向目标位置
   for (const t of tiles) {
@@ -593,12 +614,63 @@ function updateControllers() {
   }
 }
 
-app.on('select', (c) => {
+// 扳机或握把：手柄尖端碰着方块 = 用手捏起来；射线指着远处的方块 = 直接收进槽
+function press(c) {
   initAudio();
+  if (c.held) return;
   if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
-  const t = c.near || c.hover?.userData.tile;
+  if (c.near) { grab(c, c.near); return; }
+  const t = c.hover?.userData.tile;
   if (t) take(t);
-});
+}
+app.on('select', press);
+app.on('squeeze', press);
+app.on('selectend', (c) => release(c));
+app.on('squeezeend', (c) => release(c));
+
+function grab(c, t) {
+  if (!canTake(t)) { take(t); return; } // 拿不了：给出提示
+  t.origin = t.where === 'shelf' ? { where: 'shelf', slot: shelfList.indexOf(t) } : { where: 'tower' };
+  if (t.where === 'shelf') shelfList[t.origin.slot] = null;
+  t.where = 'hand';
+  t.mesh.material = iconMaterial(t.icon);
+  c.ray.attach(t.mesh);
+  t.target = new THREE.Vector3(0, 0, -TIP - 0.02);
+  c.held = t;
+  refreshFree();
+  sfx.click();
+  app.pulse(c, 0.5, 40);
+  setStatus('拿起来了：放进左手边的槽里');
+}
+function nearTray(t) {
+  const p = tray.worldToLocal(t.mesh.getWorldPosition(new THREE.Vector3()));
+  return Math.abs(p.x) < (TRAY_GAP * TRAY_SLOTS) / 2 + 0.1 && Math.abs(p.y) < 0.18 && Math.abs(p.z) < 0.18;
+}
+function release(c) {
+  const t = c.held;
+  if (!t) return;
+  c.held = null;
+  if (state === 'playing' && nearTray(t)) {
+    t.where = t.origin.where;
+    take(t, true);
+    return;
+  }
+  // 没放进槽：放回原处
+  if (t.origin.where === 'shelf') {
+    t.where = 'shelf';
+    shelfList[t.origin.slot] = t;
+    rig.attach(t.mesh);
+    t.target = SHELF[t.origin.slot].clone();
+  } else {
+    t.where = 'tower';
+    tower.attach(t.mesh);
+    t.target = towerLocal(t);
+  }
+  t.origin = null;
+  refreshFree();
+  sfx.unflag();
+  setStatus('放回去了');
+}
 
 // ================= 电脑上预览 =================
 camera.position.set(0.5, 1.75, 0.35);

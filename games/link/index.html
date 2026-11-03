@@ -37,20 +37,20 @@
 </head>
 <body>
   <a id="back" href="../../">← 返回大厅</a>
-  <div id="hint">点两个相同的方块连线 · 方向键转立方体 · H 键提示 · 拖动转视角</div>
+  <div id="hint">按住鼠标从一个圆点拖过相邻的同色点，松开就消掉</div>
   <div id="overlay">
     <div class="panel">
       <h1>空中连线</h1>
-      <p class="sub">图案方块堆成一个立方体悬在你面前，把相同的两个连起来。</p>
+      <p class="sub">面前是一面彩色圆点墙。伸手在空中把同色的点连成一条线，松手就“啪”地破掉。</p>
       <ol>
-        <li><b>用手画线</b>：用手柄尖端（白色小光点）碰一个方块，光点变绿时<b>按住扳机</b>，在空中把线拉到相同图案的方块上。</li>
-        <li>线<b>不能碰到别的方块</b>，碰到就断了。绕过去、从缝里穿过去都行。</li>
-        <li><b>用射线点</b>：远处或者手够不着的，用射线依次点两个相同的方块，按经典规则（空位里最多拐两个弯）自动连上。</li>
-        <li><b>按住握把</b>可以抓住整个立方体转动，去够背面的方块。困难模式里面还藏着一层。</li>
-        <li>4 秒内接着连上下一对算连击，分数翻倍增加。卡住了可以点面板上的<b>提示</b>或<b>洗牌</b>。</li>
+        <li>手柄尖端（白色小光点）碰到一个圆点时变绿，<b>按住扳机</b>，在空中划过<b>相邻的同色点</b>（上下左右、斜对角都算），每连一个点音调升高一点。</li>
+        <li>连到 <b>3 个或更多</b>就松开扳机，这些点全部破掉；上面的点会掉下来，顶上不断补新的，<b>可以一直玩下去</b>。划回上一个点可以撤销一步。</li>
+        <li><b>连成一个圈</b>（回到线上已经连过的点）：整面墙上这个颜色的点全部消掉！</li>
+        <li>一次连 <b>6 个以上</b>，会在最后的位置留下一颗<b>彩虹星</b>，能当任何颜色用。</li>
+        <li>3 秒内接着消算<b>连击</b>，分数翻倍。也可以用射线指着圆点按住扳机来连。还有 <b>60 秒挑战</b>模式比拼分数。</li>
       </ol>
       <div class="choices">
-        <label>难度 <select id="diff-select"><option value="easy">简单（24 块）</option><option value="normal">普通（48 块）</option><option value="hard">困难（72 块）</option></select></label>
+        <label>模式 <select id="mode-select"><option value="endless">无尽模式</option><option value="timed">60 秒挑战</option></select></label>
         <label>背景 <select id="env-select"></select></label>
       </div>
       <div class="buttons">
@@ -58,7 +58,7 @@
         <button id="enter-ar" hidden>进入混合现实</button>
         <button id="desktop" class="secondary">在电脑上预览</button>
       </div>
-      <p class="note" id="note">立方体会出现在你面前一臂远的地方，伸手前看看周围有没有东西。</p>
+      <p class="note" id="note">圆点墙会出现在你面前一臂远的地方，伸手前看看周围有没有东西。</p>
     </div>
   </div>
   <script type="module" src="./main.js"></script>

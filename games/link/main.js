@@ -1,6 +1,5 @@
-// 空中连线：一个由图案方块组成的立方体悬浮在面前。
-// 用手（手柄尖端）从一个方块画线到另一个相同图案的方块，线不能碰到别的方块；
-// 或者用射线点两个相同的方块，按经典规则（空位里最多拐两个弯）自动连。
+// 空中连线（新版）：面前一面彩色圆点墙，用手在空中把 3 个或更多相邻的同色点连成一条线，松手就破掉；
+// 上面的点往下掉、顶上不断补新的，可以一直玩下去。连成一个圈 = 这个颜色全部消掉；一次连 6 个以上会留下一颗彩虹星（能当任何颜色用）。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
@@ -10,21 +9,17 @@ import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
-import { iconMaterial, ICON_COUNT } from './icons.js';
 
 // ================= 可调参数 =================
-const PRESETS = {
-  easy:   { label: '简单', dims: [4, 3, 2], icons: 8 },
-  normal: { label: '普通', dims: [6, 4, 2], icons: 12 },
-  hard:   { label: '困难', dims: [6, 4, 3], icons: 16 },
-};
-const SPACING = 0.1;          // 方块间距（米）
-const TILE = 0.075;           // 方块边长
-const HALF = TILE / 2;
-const GRAB_PAD = 0.018;       // 手柄尖端离方块多近算“碰到”
-const FORGIVE = 0.006;        // 画线时擦边的宽容度
-const TIP = 0.045;            // 手柄尖端在手柄前方多远
-const COMBO_WINDOW = 4;       // 几秒内连上下一对算连击
+const COLS = 7, ROWS = 8;
+const GAP = 0.085;          // 圆点间距（米）
+const DOT_R = 0.028;        // 圆点半径
+const TOUCH = 0.034;        // 手柄尖端离圆点中心多近算碰到
+const TIP = 0.045;          // 尖端在手柄前方多远
+const COMBO_WINDOW = 3;     // 几秒内接着消算连击
+const TIMED_SECONDS = 60;
+const COLORS = ['#ff4d6d', '#ffd166', '#06d6a0', '#4dabf7', '#b197fc', '#ff922b'];
+const STAR = -1;            // 彩虹星：能当任何颜色
 
 // ================= 场景 =================
 const app = createXRApp({ onFrame });
@@ -50,12 +45,29 @@ function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_)
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
 const rig = new THREE.Group();
-rig.position.set(0, 1.3, -0.5);
+rig.position.set(0, 1.25, -0.45);
 scene.add(rig);
-const cluster = new THREE.Group();
-rig.add(cluster);
+const board = new THREE.Group();
+rig.add(board);
 
-// 手柄尖端的小光球（画线的笔尖）
+// 圆点墙的底板
+{
+  const w = COLS * GAP + 0.05, h = ROWS * GAP + 0.05;
+  const back = makeCanvasPlane(w, h, 600);
+  back.redraw((ctx, cw, ch) => {
+    roundRect(ctx, 4, 4, cw - 8, ch - 8, 40);
+    ctx.fillStyle = 'rgba(16, 22, 40, 0.72)';
+    ctx.fill();
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(160, 180, 230, 0.5)';
+    ctx.stroke();
+  });
+  back.mesh.position.z = -0.03;
+  board.add(back.mesh);
+}
+const cellPos = (c, r) => new THREE.Vector3((c - (COLS - 1) / 2) * GAP, (r - (ROWS - 1) / 2) * GAP, 0);
+
+// 手柄尖端
 const tips = app.controllers.map(() => {
   const m = new THREE.Mesh(new THREE.SphereGeometry(0.009, 12, 8), new THREE.MeshBasicMaterial({ color: '#ffffff' }));
   m.visible = false;
@@ -63,327 +75,211 @@ const tips = app.controllers.map(() => {
   return m;
 });
 
-// 选中 / 悬停 / 提示 用的发光框
-function outline(color) {
-  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(TILE * 1.18, TILE * 1.18, TILE * 1.18));
-  const m = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95 }));
-  m.visible = false;
-  cluster.add(m);
-  return m;
-}
-const selBox = outline('#ffffff');
-const hoverBox = outline('#8ecae6');
-const hintBoxes = [outline('#ffd166'), outline('#ffd166')];
+// ================= 圆点 =================
+const dotGeo = new THREE.SphereGeometry(DOT_R, 24, 16);
+const starGeo = (() => {
+  const s = new THREE.Shape();
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 ? DOT_R * 0.5 : DOT_R * 1.15, a = Math.PI / 2 + (i * Math.PI) / 5;
+    i ? s.lineTo(Math.cos(a) * r, Math.sin(a) * r) : s.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.014, bevelEnabled: true, bevelSize: 0.004, bevelThickness: 0.004, bevelSegments: 1 });
+  g.translate(0, 0, -0.007);
+  return g;
+})();
+const dotMats = COLORS.map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.25, metalness: 0.05, emissive: c, emissiveIntensity: 0.12 }));
+const starMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2, metalness: 0.4, emissive: '#ffffff', emissiveIntensity: 0.35 });
 
-const tileGeo = new THREE.BoxGeometry(TILE, TILE, TILE);
-
-// ================= 游戏状态 =================
-let presetKey = loadPref('link-preset', 'normal');
-if (!PRESETS[presetKey]) presetKey = 'normal';
-let cfg = PRESETS[presetKey];
-let grid = [];       // grid[i][j][k] = tile | null
-let tiles = [];
-let state = 'playing'; // playing | won
-let score = 0, combo = 0, lastMatch = -99, startTime = 0, endTime = 0;
-let selected = null;
-let stroke = null;   // 正在用手画的线
-let grab = null;     // 正在用握把转立方体
-let hintUntil = 0;
+let grid = [];           // grid[c][r] = dot | null
+let nColors = 5;
+let mode = 'endless';    // endless | timed
+let state = 'playing';   // playing | over
+let score = 0, combo = 0, lastClear = -99, timeLeft = TIMED_SECONDS;
+let clock = 0;
+let chain = null;        // { cells: [dot...], color, by: controller|'mouse', closed }
 let statusText = '';
 const effects = [];
-let clock = 0;
 
-const cellPos = (i, j, k) => new THREE.Vector3(
-  (i - (cfg.dims[0] - 1) / 2) * SPACING,
-  (j - (cfg.dims[1] - 1) / 2) * SPACING,
-  (k - (cfg.dims[2] - 1) / 2) * SPACING
-);
+function makeDot(c, r, color, fromRow = r) {
+  const mesh = new THREE.Mesh(color === STAR ? starGeo : dotGeo, color === STAR ? starMat : dotMats[color]);
+  mesh.position.copy(cellPos(c, fromRow));
+  board.add(mesh);
+  const d = { c, r, color, mesh, vy: 0 };
+  mesh.userData.dot = d;
+  return d;
+}
+const randColor = () => Math.floor(Math.random() * nColors);
 
-function newGame(key = presetKey) {
-  presetKey = key;
-  savePref('link-preset', key);
-  cfg = PRESETS[key];
-  for (const t of tiles) cluster.remove(t.mesh);
-  tiles = [];
-  const [X, Y, Z] = cfg.dims;
-  const n = X * Y * Z;
-  const icons = [];
-  for (let p = 0; p < n / 2; p++) { const ic = p % Math.min(cfg.icons, ICON_COUNT); icons.push(ic, ic); }
-  shuffleArr(icons);
-  grid = Array.from({ length: X }, () => Array.from({ length: Y }, () => Array(Z).fill(null)));
-  let idx = 0;
-  for (let i = 0; i < X; i++) for (let j = 0; j < Y; j++) for (let k = 0; k < Z; k++) {
-    const mesh = new THREE.Mesh(tileGeo, iconMaterial(icons[idx]));
-    mesh.position.copy(cellPos(i, j, k));
-    const t = { i, j, k, icon: icons[idx++], mesh, alive: true };
-    mesh.userData.tile = t;
-    grid[i][j][k] = t;
-    tiles.push(t);
-    cluster.add(mesh);
-  }
-  cluster.quaternion.identity();
-  // 稍微转一点角度，一开始就能看出是立体的
-  cluster.rotation.set(0.25, -0.35, 0);
+function newGame(m = mode, colors = nColors) {
+  mode = m;
+  nColors = colors;
+  savePref('dots-mode', mode);
+  savePref('dots-colors', String(nColors));
+  for (const col of grid) for (const d of col) if (d) board.remove(d.mesh);
+  grid = Array.from({ length: COLS }, (_, c) => Array.from({ length: ROWS }, (_, r) => makeDot(c, r, randColor(), r + ROWS + 1)));
+  ensureMove();
   state = 'playing';
-  score = 0; combo = 0; lastMatch = -99;
-  startTime = performance.now(); endTime = 0;
-  selected = null; stroke = null; grab = null; hintUntil = 0;
-  selBox.visible = false; hintBoxes.forEach((b) => (b.visible = false));
+  score = 0; combo = 0; lastClear = -99; timeLeft = TIMED_SECONDS;
+  cancelChain();
   refreshButtons();
-  setStatus('用手柄尖端碰一个方块，按住扳机画线到相同图案');
+  setStatus(mode === 'timed' ? '60 秒挑战：能连多少连多少！' : '把 3 个以上相邻的同色点连成一条线');
   sfx.click();
 }
 
-function shuffleArr(a) {
-  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
+// ================= 连线规则 =================
+const adjacent = (a, b) => a !== b && Math.abs(a.c - b.c) <= 1 && Math.abs(a.r - b.r) <= 1; // 上下左右和斜对角都算
+function chainColor(cells) {
+  const d = cells.find((x) => x.color !== STAR);
+  return d ? d.color : STAR;
 }
-const alive = () => tiles.filter((t) => t.alive);
-
-// ================= 经典规则：最多拐两个弯的路径 =================
-const DIRS = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
-function findPath(a, b) {
-  if (a === b || a.icon !== b.icon) return null;
-  const [X, Y, Z] = cfg.dims;
-  const inside = (i, j, k) => i >= 0 && j >= 0 && k >= 0 && i < X && j < Y && k < Z;
-  const inBounds = (i, j, k) => i >= -1 && j >= -1 && k >= -1 && i <= X && j <= Y && k <= Z;
-  const free = (i, j, k) => !inside(i, j, k) || !grid[i][j][k] || grid[i][j][k] === b;
-  const key = (i, j, k, d) => `${i},${j},${k},${d}`;
-  const best = new Map();
-  const queue = [];
-  for (let d = 0; d < 6; d++) queue.push({ i: a.i, j: a.j, k: a.k, d, turns: 0, prev: null, start: true });
-  while (queue.length) {
-    const s = queue.shift();
-    const [di, dj, dk] = DIRS[s.d];
-    const ni = s.i + di, nj = s.j + dj, nk = s.k + dk;
-    if (!inBounds(ni, nj, nk) || !free(ni, nj, nk)) continue;
-    const node = { i: ni, j: nj, k: nk, d: s.d, turns: s.turns, prev: s.start ? { i: a.i, j: a.j, k: a.k, prev: null } : s };
-    if (ni === b.i && nj === b.j && nk === b.k) {
-      const cells = [];
-      for (let p = node; p; p = p.prev) cells.push([p.i, p.j, p.k]);
-      return simplifyPath(cells.reverse());
-    }
-    for (let d = 0; d < 6; d++) {
-      const turns = node.turns + (d === node.d ? 0 : 1);
-      if (turns > 2) continue;
-      const kk = key(ni, nj, nk, d);
-      if (best.has(kk) && best.get(kk) <= turns) continue;
-      best.set(kk, turns);
-      const next = { ...node, d, turns };
-      if (d === node.d) queue.unshift(next); else queue.push(next);
-    }
-  }
-  return null;
-}
-// 只保留拐点，画出来的线更干净
-function simplifyPath(cells) {
-  const out = [cells[0]];
-  for (let n = 1; n < cells.length - 1; n++) {
-    const a = cells[n - 1], b = cells[n], c = cells[n + 1];
-    const d1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], d2 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
-    if (d1[0] !== d2[0] || d1[1] !== d2[1] || d1[2] !== d2[2]) out.push(b);
-  }
-  out.push(cells[cells.length - 1]);
-  return out;
-}
-function anyPair() {
-  const list = alive();
-  for (let x = 0; x < list.length; x++) for (let y = x + 1; y < list.length; y++) {
-    if (list[x].icon === list[y].icon && findPath(list[x], list[y])) return [list[x], list[y]];
-  }
-  return null;
+function canJoin(cells, d) {
+  const col = chainColor(cells);
+  return d.color === STAR || col === STAR || d.color === col;
 }
 
-// ================= 连上一对 =================
-function match(a, b, localPoints) {
-  a.alive = false; b.alive = false;
-  grid[a.i][a.j][a.k] = null;
-  grid[b.i][b.j][b.k] = null;
-  combo = clock - lastMatch < COMBO_WINDOW ? combo + 1 : 1;
-  lastMatch = clock;
-  const gained = 10 * combo;
-  score += gained;
-  flashLine(localPoints, '#ffd166', 0.6);
-  pop(a); pop(b);
-  sfx.perfect(Math.min(combo, 3));
-  app.pulseAll(0.6, 70);
-  if (selected === a || selected === b) { selected = null; selBox.visible = false; }
-  hintBoxes.forEach((h) => (h.visible = false));
-  const left = alive().length;
-  if (left === 0) return win();
-  setStatus(combo > 1 ? `连击 ×${combo}！+${gained}` : `+${gained}  还剩 ${left / 2} 对`);
+function startChain(d, by) {
+  if (state !== 'playing' || chain) return;
+  chain = { cells: [d], by, closed: false, line: makeLine(colorOf(d.color)) };
+  bump(d);
+  sfx.tick();
 }
+function colorOf(c) { return c === STAR ? '#ffffff' : COLORS[c]; }
 
-function win() {
-  state = 'won';
-  endTime = performance.now();
-  const t = endTime - startTime;
-  const bestKey = 'link-best-' + presetKey;
-  const best = Number(loadPref(bestKey, '0')) || 0;
-  const record = !best || t < best;
-  if (record) savePref(bestKey, String(t));
-  sfx.win();
-  confetti();
-  setStatus(record ? `全部连完！新纪录 ${fmt(t)}` : `全部连完！用时 ${fmt(t)}`);
-}
-
-// ================= 用手画线 =================
-const tmpV = new THREE.Vector3();
-const tmpQ = new THREE.Quaternion();
-function tipWorld(c, target = new THREE.Vector3()) {
-  target.setFromMatrixPosition(c.ray.matrixWorld);
-  tmpV.set(0, 0, -1).applyQuaternion(c.ray.getWorldQuaternion(tmpQ));
-  return target.addScaledVector(tmpV, TIP);
-}
-function tileAtLocal(p, pad) {
-  let best = null, bestD = Infinity;
-  for (const t of tiles) {
-    if (!t.alive) continue;
-    const q = t.mesh.position;
-    const dx = Math.abs(p.x - q.x), dy = Math.abs(p.y - q.y), dz = Math.abs(p.z - q.z);
-    if (dx < HALF + pad && dy < HALF + pad && dz < HALF + pad) {
-      const d = dx + dy + dz;
-      if (d < bestD) { bestD = d; best = t; }
-    }
-  }
-  return best;
-}
-// 线段 p0→p1 与方块（轴对齐盒子）的相交，返回进入点的参数 t（0~1），没碰到返回 null
-function segBox(p0, p1, center, h) {
-  let tmin = 0, tmax = 1;
-  for (const ax of ['x', 'y', 'z']) {
-    const d = p1[ax] - p0[ax];
-    const lo = center[ax] - h, hi = center[ax] + h;
-    if (Math.abs(d) < 1e-9) {
-      if (p0[ax] < lo || p0[ax] > hi) return null;
-    } else {
-      let t1 = (lo - p0[ax]) / d, t2 = (hi - p0[ax]) / d;
-      if (t1 > t2) [t1, t2] = [t2, t1];
-      tmin = Math.max(tmin, t1);
-      tmax = Math.min(tmax, t2);
-      if (tmin > tmax) return null;
-    }
-  }
-  return tmin;
-}
-
-function startStroke(c, from) {
-  stroke = { c, from, points: [from.mesh.position.clone()], line: makeLine('#9bf6ff') };
-  selected = null;
-  selBox.visible = false;
-  sfx.click();
-  app.pulse(c, 0.4, 30);
-}
-
-function updateStroke() {
-  const local = cluster.worldToLocal(tipWorld(stroke.c));
-  const last = stroke.points[stroke.points.length - 1];
-  if (local.distanceTo(last) > 0.004) {
-    // 检查这一小段有没有穿过别的方块
-    let hit = null, hitT = Infinity;
-    for (const t of tiles) {
-      if (!t.alive || t === stroke.from) continue;
-      const tt = segBox(last, local, t.mesh.position, HALF - (t.icon === stroke.from.icon ? -0.004 : FORGIVE));
-      if (tt !== null && tt < hitT) { hitT = tt; hit = t; }
-    }
-    if (hit) {
-      if (hit.icon === stroke.from.icon) {
-        const pts = [...stroke.points, hit.mesh.position.clone()];
-        const from = stroke.from;
-        disposeLine(stroke.line);
-        stroke = null;
-        match(from, hit, pts);
-        return;
-      }
-      // 碰到别的图案：线断了
-      const pts = [...stroke.points, last.clone().lerp(local, hitT)];
-      disposeLine(stroke.line);
-      flashLine(pts, '#ff4d4d', 0.5);
-      flashTile(hit, '#ff4d4d');
-      sfx.warn();
-      app.pulse(stroke.c, 0.9, 120);
-      stroke = null;
-      combo = 0;
-      setStatus('碰到别的方块了，线断了');
-      return;
-    }
-    stroke.points.push(local);
-  }
-  setLinePoints(stroke.line, [...stroke.points, local]);
-}
-
-function cancelStroke() {
-  if (!stroke) return;
-  flashLine([...stroke.points], '#9bf6ff', 0.25);
-  disposeLine(stroke.line);
-  stroke = null;
-}
-
-// ================= 用射线点选 =================
-function clickTile(t) {
-  if (state !== 'playing' || !t.alive) return;
-  if (!selected) { select(t); return; }
-  if (selected === t) { selected = null; selBox.visible = false; return; }
-  if (selected.icon === t.icon) {
-    const path = findPath(selected, t);
-    if (path) { match(selected, t, path.map(([i, j, k]) => cellPos(i, j, k))); return; }
-    setStatus('被挡住了：试试用手画线，或者转一下立方体');
-    sfx.warn();
-    flashTile(t, '#ff9f43');
+// 手（或射线、鼠标）碰到一个点：加进链、退回一步、或者连成圈
+function touchDot(d) {
+  if (!chain || !d) return;
+  const cells = chain.cells;
+  const last = cells[cells.length - 1];
+  if (d === last) return;
+  if (cells.length >= 2 && d === cells[cells.length - 2]) { // 往回走：撤掉最后一个
+    cells.pop();
+    chain.closed = false;
+    sfx.unflag();
     return;
   }
-  select(t);
+  if (!adjacent(last, d) || !canJoin(cells, d)) return;
+  if (cells.includes(d)) {
+    // 连回链上已有的点 = 圈
+    if (cells.length >= 3 && !chain.closed) { chain.closed = true; sfx.perfect(1); chain.by?.inputSource && app.pulse(chain.by, 0.6, 60); }
+    return;
+  }
+  if (chain.closed) return;
+  cells.push(d);
+  bump(d);
+  const n = cells.length;
+  playNote(n);
+  if (chain.by?.inputSource) app.pulse(chain.by, 0.2 + Math.min(0.6, n * 0.05), 25);
 }
-function select(t) {
-  selected = t;
-  selBox.visible = true;
-  selBox.position.copy(t.mesh.position);
-  sfx.click();
+function bump(d) { d.pop = 0.18; }
+
+function finishChain() {
+  if (!chain) return;
+  const cells = chain.cells;
+  const col = chainColor(cells);
+  disposeLine(chain.line);
+  if (cells.length < 3) { chain = null; return; }
+  let clear = cells.slice();
+  let label;
+  if (chain.closed && col !== STAR) {
+    // 圈：这个颜色全部消掉
+    for (const column of grid) for (const d of column) if (d && d.color === col && !clear.includes(d)) clear.push(d);
+    label = `成圈！整个颜色消掉`;
+  }
+  const n = clear.length;
+  combo = clock - lastClear < COMBO_WINDOW ? combo + 1 : 1;
+  lastClear = clock;
+  const gained = Math.round(n * 10 * (1 + Math.max(0, cells.length - 3) * 0.3) * combo);
+  score += gained;
+  // 连 6 个以上：在最后一个点的位置留下一颗彩虹星
+  const starAt = cells.length >= 6 ? cells[cells.length - 1] : null;
+  for (const d of clear) {
+    grid[d.c][d.r] = null;
+    burst(d);
+  }
+  if (starAt) grid[starAt.c][starAt.r] = makeDot(starAt.c, starAt.r, STAR);
+  drop();
+  ensureMove();
+  sfx.perfect(Math.min(3, Math.floor(cells.length / 2)));
+  app.pulseAll(0.5 + Math.min(0.5, n * 0.04), 80);
+  popup(`+${gained}${combo > 1 ? `  连击×${combo}` : ''}`, cells[cells.length - 1]);
+  setStatus(label || (starAt ? `${cells.length} 连！留下一颗彩虹星` : combo > 1 ? `连击 ×${combo}！` : `${cells.length} 连 +${gained}`));
+  chain = null;
+  drawPanel();
+}
+function cancelChain() {
+  if (chain) disposeLine(chain.line);
+  chain = null;
 }
 
-// ================= 线和特效 =================
+// 上面的点往下掉，顶上补新的
+function drop() {
+  for (let c = 0; c < COLS; c++) {
+    const col = grid[c].filter(Boolean);
+    let spawn = 0;
+    while (col.length < ROWS) { col.push(makeDot(c, 0, randColor(), ROWS + 0.6 + spawn)); spawn++; }
+    col.forEach((d, r) => { d.c = c; d.r = r; });
+    grid[c] = col;
+  }
+}
+// 如果没有任何能连 3 个的地方，就把颜色打乱
+function hasMove() {
+  const all = grid.flat();
+  for (const a of all) {
+    for (const b of all) {
+      if (!adjacent(a, b) || !canJoin([a], b)) continue;
+      for (const c2 of all) if (c2 !== a && adjacent(b, c2) && canJoin([a, b], c2)) return true;
+    }
+  }
+  return false;
+}
+function ensureMove() {
+  let guard = 0;
+  while (!hasMove() && guard++ < 20) {
+    for (const d of grid.flat()) if (d.color !== STAR) { d.color = randColor(); d.mesh.material = dotMats[d.color]; }
+  }
+}
+
+// ================= 声音、线和特效 =================
+const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19, 21, 24];
+let audioCtx = null;
+function playNote(n) {
+  // 每多连一个点音调升高一点（五声音阶），听起来像在弹琴
+  try {
+    audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+    const f = 440 * Math.pow(2, SCALE[Math.min(SCALE.length - 1, n - 1)] / 12);
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = f;
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    o.connect(g).connect(audioCtx.destination);
+    o.start();
+    o.stop(audioCtx.currentTime + 0.3);
+  } catch (_) { /* 没有声音也能玩 */ }
+}
 function makeLine(color) {
-  const mat = new LineMaterial({ color, linewidth: 0.007, worldUnits: true, transparent: true, depthTest: true });
+  const mat = new LineMaterial({ color, linewidth: 0.012, worldUnits: true, transparent: true });
   mat.resolution.set(innerWidth, innerHeight);
   const line = new Line2(new LineGeometry(), mat);
   line.frustumCulled = false;
-  cluster.add(line);
+  line.visible = false;
+  board.add(line);
   return line;
 }
 function setLinePoints(line, pts) {
   if (pts.length < 2) { line.visible = false; return; }
   line.visible = true;
   const arr = [];
-  for (const p of pts) arr.push(p.x, p.y, p.z);
+  for (const p of pts) arr.push(p.x, p.y, p.z + 0.012);
   line.geometry.dispose();
   line.geometry = new LineGeometry();
   line.geometry.setPositions(arr);
 }
 function disposeLine(line) {
-  cluster.remove(line);
+  board.remove(line);
   line.geometry.dispose();
   line.material.dispose();
-}
-function flashLine(pts, color, life) {
-  const line = makeLine(color);
-  setLinePoints(line, pts);
-  line.material.linewidth = 0.01;
-  effects.push({ t: 0, life, update: (k) => { line.material.opacity = 1 - k; }, done: () => disposeLine(line) });
-}
-function flashTile(t, color) {
-  const box = outline(color);
-  box.visible = true;
-  box.position.copy(t.mesh.position);
-  effects.push({ t: 0, life: 0.5, update: (k) => { box.material.opacity = 1 - k; box.scale.setScalar(1 + k * 0.3); }, done: () => { cluster.remove(box); box.geometry.dispose(); box.material.dispose(); } });
-}
-function pop(t) {
-  const m = t.mesh;
-  effects.push({
-    t: 0, life: 0.35,
-    update: (k) => { m.scale.setScalar(k < 0.3 ? 1 + k : (1.3 * (1 - (k - 0.3) / 0.7))); m.rotation.y += 0.3; },
-    done: () => cluster.remove(m),
-  });
-  sparkle(m.position);
 }
 const dotTex = (() => {
   const c = document.createElement('canvas');
@@ -398,108 +294,97 @@ const dotTex = (() => {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 })();
-function sparkle(at, n = 24, color = '#fff2b0', speed = 0.35, inScene = false) {
-  const pos = new Float32Array(n * 3), vel = [];
+function burst(d) {
+  const m = d.mesh;
+  effects.push({ t: 0, life: 0.22, update: (k) => m.scale.setScalar(1 + k * 0.8), done: () => board.remove(m) });
+  const n = 14, pos = new Float32Array(n * 3), vel = [];
+  const at = m.position;
   for (let i = 0; i < n; i++) {
     pos[i * 3] = at.x; pos[i * 3 + 1] = at.y; pos[i * 3 + 2] = at.z;
-    vel.push(new THREE.Vector3().randomDirection().multiplyScalar(speed * (0.4 + Math.random())));
+    vel.push(new THREE.Vector3((Math.random() - 0.5) * 0.6, (Math.random() - 0.2) * 0.6, Math.random() * 0.3));
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, size: inScene ? 0.04 : 0.014, color, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
-  (inScene ? scene : cluster).add(pts);
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, size: 0.016, color: colorOf(d.color), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  board.add(pts);
   let last = 0;
   effects.push({
-    t: 0, life: inScene ? 2.5 : 0.6,
+    t: 0, life: 0.6,
     update: (k, t) => {
       const dt = t - last; last = t;
-      for (let i = 0; i < n; i++) {
-        if (inScene) vel[i].y -= 1.5 * dt;
-        pos[i * 3] += vel[i].x * dt; pos[i * 3 + 1] += vel[i].y * dt; pos[i * 3 + 2] += vel[i].z * dt;
-      }
+      for (let i = 0; i < n; i++) { vel[i].y -= 1.2 * dt; pos[i * 3] += vel[i].x * dt; pos[i * 3 + 1] += vel[i].y * dt; pos[i * 3 + 2] += vel[i].z * dt; }
       geo.attributes.position.needsUpdate = true;
       pts.material.opacity = 1 - k;
     },
-    done: () => { (inScene ? scene : cluster).remove(pts); geo.dispose(); pts.material.dispose(); },
+    done: () => { board.remove(pts); geo.dispose(); pts.material.dispose(); },
   });
 }
-function confetti() {
-  const at = rig.localToWorld(new THREE.Vector3(0, 0.2, 0));
-  for (const c of ['#ffd166', '#5cffb0', '#5aa9ff', '#ff7a2f', '#c891ff']) sparkle(at, 50, c, 1.6, true);
-}
-
-// ================= 提示 / 洗牌 =================
-function showHint() {
-  if (state !== 'playing') return;
-  const pair = anyPair();
-  if (!pair) { setStatus('经典规则下没有能连的了，可以用手画线或者洗牌'); sfx.warn(); return; }
-  pair.forEach((t, n) => { hintBoxes[n].visible = true; hintBoxes[n].position.copy(t.mesh.position); });
-  hintUntil = clock + 4;
-  sfx.click();
-}
-function shuffleTiles() {
-  if (state !== 'playing') return;
-  const list = alive();
-  const icons = shuffleArr(list.map((t) => t.icon));
-  list.forEach((t, n) => { t.icon = icons[n]; t.mesh.material = iconMaterial(t.icon); });
-  selected = null; selBox.visible = false;
-  hintBoxes.forEach((h) => (h.visible = false));
-  combo = 0;
-  setStatus('洗好了');
-  sfx.flag();
+function popup(text, d) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  g.font = `800 64px ${FONT}`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineWidth = 10;
+  g.strokeStyle = 'rgba(0,0,0,0.6)';
+  g.strokeText(text, 256, 64);
+  g.fillStyle = '#ffe066';
+  g.fillText(text, 256, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+  s.scale.set(0.24, 0.06, 1);
+  const p0 = cellPos(d.c, d.r).add(new THREE.Vector3(0, 0, 0.06));
+  s.position.copy(p0);
+  board.add(s);
+  effects.push({ t: 0, life: 1, update: (k) => { s.position.y = p0.y + k * 0.06; s.material.opacity = 1 - Math.max(0, k - 0.6) / 0.4; }, done: () => { board.remove(s); tex.dispose(); s.material.dispose(); } });
 }
 
 // ================= 面板 =================
 const panelGroup = new THREE.Group();
-panelGroup.position.set(-0.72, 0.12, -0.08);
+panelGroup.position.set(-0.7, 0.05, 0.04);
 panelGroup.rotation.y = 0.55;
 rig.add(panelGroup);
-const panel = makeCanvasPlane(0.62, 0.3, 1400);
+const panel = makeCanvasPlane(0.58, 0.3, 1400);
 panelGroup.add(panel.mesh);
 const uiButtons = [];
-const diffButtons = {};
-Object.keys(PRESETS).forEach((k, n) => {
-  const b = makeButton(PRESETS[k].label, { width: 0.19, height: 0.065, color: '#2f3f6e', onClick: () => newGame(k) });
-  b.position.set((n - 1) * 0.205, -0.2, 0);
-  panelGroup.add(b);
-  diffButtons[k] = b;
-  uiButtons.push(b);
-});
-const mk = (label, x, y, color, onClick, w = 0.3) => {
+const mk = (label, x, y, color, onClick, w = 0.28) => {
   const b = makeButton(label, { width: w, height: 0.065, color, onClick });
   b.position.set(x, y, 0);
   panelGroup.add(b);
   uiButtons.push(b);
   return b;
 };
-mk('提示', -0.155, -0.275, '#8a6a1f', showHint);
-mk('洗牌', 0.155, -0.275, '#8a6a1f', shuffleTiles);
-mk('重新开始 A/X', -0.155, -0.35, '#3a5bd9', () => newGame());
-mk('移到面前 B/Y', 0.155, -0.35, '#3a5bd9', () => placeInFront());
-const envButton = mk('背景：… ▶', 0, -0.425, '#5a4a2e', () => envs.next(), 0.61);
+const endlessBtn = mk('无尽模式', -0.145, -0.2, '#2f3f6e', () => newGame('endless'));
+const timedBtn = mk('60 秒挑战', 0.145, -0.2, '#2f3f6e', () => newGame('timed'));
+const c5Btn = mk('5 种颜色', -0.145, -0.275, '#2f3f6e', () => newGame(mode, 5));
+const c6Btn = mk('6 种颜色', 0.145, -0.275, '#2f3f6e', () => newGame(mode, 6));
+mk('重新开始 A/X', -0.145, -0.35, '#3a5bd9', () => newGame());
+mk('移到面前 B/Y', 0.145, -0.35, '#3a5bd9', () => placeInFront());
+const envButton = mk('背景：… ▶', 0, -0.425, '#5a4a2e', () => envs.next(), 0.57);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
 
 function refreshButtons() {
-  for (const [k, b] of Object.entries(diffButtons)) b.userData.ui.setActive(k === presetKey);
+  endlessBtn.userData.ui.setActive(mode === 'endless');
+  timedBtn.userData.ui.setActive(mode === 'timed');
+  c5Btn.userData.ui.setActive(nColors === 5);
+  c6Btn.userData.ui.setActive(nColors === 6);
 }
-function fmt(ms) {
-  const s = Math.floor(ms / 1000);
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
+const bestKey = () => `dots-best-${mode}-${nColors}`;
 function drawPanel() {
-  const best = Number(loadPref('link-best-' + presetKey, '0')) || 0;
-  const t = (state === 'won' ? endTime : performance.now()) - startTime;
+  const best = Number(loadPref(bestKey(), '0')) || 0;
   panel.redraw((ctx, w, h) => {
     roundRect(ctx, 4, 4, w - 8, h - 8, 34);
     ctx.fillStyle = 'rgba(18, 25, 44, 0.9)';
     ctx.fill();
     ctx.lineWidth = 6;
-    ctx.strokeStyle = state === 'won' ? '#5cffb0' : '#3b4a78';
+    ctx.strokeStyle = state === 'over' ? '#5cffb0' : '#3b4a78';
     ctx.stroke();
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
     ctx.fillStyle = '#eef2fb';
-    ctx.font = `800 64px ${FONT}`;
+    ctx.font = `800 62px ${FONT}`;
     ctx.fillText('空中连线', 40, 70);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#f5b941';
@@ -508,35 +393,78 @@ function drawPanel() {
     ctx.textAlign = 'left';
     ctx.font = `600 38px ${FONT}`;
     ctx.fillStyle = '#c9d3ea';
-    ctx.fillText(`还剩 ${alive().length / 2} 对`, 40, 160);
-    ctx.fillText(`用时 ${fmt(t)}`, 300, 160);
-    ctx.fillText(`最佳 ${best ? fmt(best) : '--'}`, 560, 160);
+    ctx.fillText(mode === 'timed' ? `剩余 ${Math.ceil(timeLeft)} 秒` : '无尽模式', 40, 160);
+    ctx.fillText(`最佳 ${best}`, 330, 160);
     ctx.font = `700 38px ${FONT}`;
-    ctx.fillStyle = state === 'won' ? '#5cffb0' : '#eef2fb';
-    ctx.fillText(statusText, 40, 300);
-    ctx.font = `500 30px ${FONT}`;
+    ctx.fillStyle = state === 'over' ? '#5cffb0' : '#eef2fb';
+    ctx.fillText(statusText, 40, 290);
+    ctx.font = `500 28px ${FONT}`;
     ctx.fillStyle = '#8f9bb8';
-    ctx.fillText('按住握把可以转动立方体', 40, 360);
+    ctx.fillText('连成圈消掉整个颜色 · 6 连以上得彩虹星', 40, 360);
   });
 }
 function setStatus(t) { statusText = t; drawPanel(); }
+function timeUp() {
+  state = 'over';
+  cancelChain();
+  const best = Number(loadPref(bestKey(), '0')) || 0;
+  const record = score > best;
+  if (record) savePref(bestKey(), String(score));
+  sfx.win();
+  setStatus(record ? `时间到！新纪录 ${score} 分` : `时间到！得分 ${score}`);
+}
 
 let placeAfter = -1;
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
   const f = app.headForward(new THREE.Vector3());
-  const y = app.presenting ? head.y - 0.32 : 1.3;
-  rig.position.set(head.x + f.x * 0.5, y, head.z + f.z * 0.5);
+  const y = app.presenting ? head.y - 0.3 : 1.25;
+  rig.position.set(head.x + f.x * 0.45, y, head.z + f.z * 0.45);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
   sfx.click();
 }
 
 // ================= 每一帧 =================
-let lastSecond = -1;
-const tmpW = new THREE.Vector3();
+const tmpV = new THREE.Vector3();
+const tmpQ = new THREE.Quaternion();
+let lastPanelSec = -1;
+function tipWorld(c, target) {
+  target.setFromMatrixPosition(c.ray.matrixWorld);
+  tmpV.set(0, 0, -1).applyQuaternion(c.ray.getWorldQuaternion(tmpQ));
+  return target.addScaledVector(tmpV, TIP);
+}
+function dotNear(local, radius) {
+  let best = null, bd = radius;
+  for (const col of grid) for (const d of col) {
+    if (!d) continue;
+    const p = cellPos(d.c, d.r);
+    const dd = Math.hypot(local.x - p.x, local.y - p.y, (local.z - p.z) * 0.6);
+    if (dd < bd) { bd = dd; best = d; }
+  }
+  return best;
+}
+
 function onFrame(dt) {
   clock += dt;
   envs.update(dt);
+
+  // 圆点掉落（带一点弹跳）
+  for (const col of grid) for (const d of col) {
+    if (!d) continue;
+    const target = cellPos(d.c, d.r);
+    const p = d.mesh.position;
+    if (p.y > target.y + 1e-4) {
+      d.vy -= 3.5 * dt;
+      p.y = Math.max(target.y, p.y + d.vy * dt);
+      if (p.y === target.y) d.vy = 0;
+    } else { p.y = target.y; d.vy = 0; }
+    p.x += (target.x - p.x) * Math.min(1, dt * 12);
+    const inChain = chain?.cells.includes(d);
+    d.pop = Math.max(0, (d.pop || 0) - dt);
+    const s = (inChain ? 1.25 : 1) + d.pop * 1.5;
+    d.mesh.scale.setScalar(THREE.MathUtils.lerp(d.mesh.scale.x, s, Math.min(1, dt * 18)));
+    if (d.color === STAR) d.mesh.rotation.z += dt * 1.5;
+  }
 
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeInFront(); }
@@ -549,15 +477,21 @@ function onFrame(dt) {
     controls.update();
   }
 
-  if (stroke) updateStroke();
-  if (grab) {
-    const q = grab.c.grip.getWorldQuaternion(new THREE.Quaternion()).multiply(grab.invStart);
-    const world = q.multiply(grab.startWorld);
-    const rigQ = rig.getWorldQuaternion(new THREE.Quaternion()).invert();
-    cluster.quaternion.copy(rigQ.multiply(world));
+  if (chain) {
+    const pts = chain.cells.map((d) => cellPos(d.c, d.r));
+    if (chain.closed) pts.push(cellPos(chain.cells[0].c, chain.cells[0].r));
+    else if (chain.cursor) pts.push(chain.cursor);
+    setLinePoints(chain.line, pts);
+    chain.line.material.color.set(colorOf(chainColor(chain.cells)));
+    chain.line.material.linewidth = chain.closed ? 0.018 : 0.012;
   }
-  if (hintUntil && clock > hintUntil) { hintBoxes.forEach((h) => (h.visible = false)); hintUntil = 0; }
-  for (const h of hintBoxes) if (h.visible) h.material.opacity = 0.6 + 0.4 * Math.sin(clock * 8);
+
+  if (mode === 'timed' && state === 'playing') {
+    timeLeft -= dt;
+    if (timeLeft <= 0) { timeLeft = 0; timeUp(); }
+    const sec = Math.ceil(timeLeft);
+    if (sec !== lastPanelSec) { lastPanelSec = sec; drawPanel(); }
+  }
 
   for (let n = effects.length - 1; n >= 0; n--) {
     const e = effects[n];
@@ -566,87 +500,78 @@ function onFrame(dt) {
     e.update(k, e.t);
     if (k >= 1) { e.done?.(); effects.splice(n, 1); }
   }
-
-  if (state === 'playing') {
-    const s = Math.floor((performance.now() - startTime) / 1000);
-    if (s !== lastSecond) { lastSecond = s; drawPanel(); }
-  }
 }
 
 function updateControllers() {
-  const targets = [...uiButtons, ...alive().map((t) => t.mesh)];
+  const dotsMeshes = grid.flat().filter(Boolean).map((d) => d.mesh);
   const hovered = new Set();
-  let hoverTile = null;
   app.controllers.forEach((c, n) => {
     const tip = tips[n];
     if (!c.inputSource) { tip.visible = false; return; }
     tip.visible = true;
-    tip.position.copy(tipWorld(c, tmpW));
-    // 笔尖碰到方块时变色
-    const near = state === 'playing' && !stroke ? tileAtLocal(cluster.worldToLocal(tmpW.clone()), GRAB_PAD) : null;
-    tip.material.color.set(stroke?.c === c ? '#9bf6ff' : near ? '#5cffb0' : '#ffffff');
-    c.near = near;
-    const hit = stroke?.c === c ? null : app.pointAt(c, targets, 3);
+    tipWorld(c, tip.position);
+    const local = board.worldToLocal(tip.position.clone());
+    c.near = Math.abs(local.z) < 0.08 ? dotNear(local, TOUCH) : null;
+    tip.material.color.set(chain?.by === c ? colorOf(chainColor(chain.cells)) : c.near ? '#5cffb0' : '#ffffff');
+    const hit = app.pointAt(c, [...uiButtons, ...dotsMeshes], 3);
     c.hover = hit ? hit.object : null;
     if (c.hover) hovered.add(c.hover);
-    if (c.hover?.userData.tile) hoverTile = c.hover.userData.tile;
+    if (chain?.by === c) {
+      // 用手画：尖端碰到哪个点；用射线画：射线指着哪个点
+      if (chain.mode === 'hand') {
+        chain.cursor = local;
+        if (c.near) touchDot(c.near);
+      } else if (hit?.object.userData.dot) {
+        chain.cursor = board.worldToLocal(hit.point.clone());
+        touchDot(hit.object.userData.dot);
+      }
+    }
   });
   for (const b of uiButtons) b.userData.ui.setHover(hovered.has(b));
-  hoverBox.visible = !!hoverTile;
-  if (hoverTile) hoverBox.position.copy(hoverTile.mesh.position);
 }
 
 app.on('select', (c) => {
   initAudio();
   if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
-  if (state !== 'playing' || stroke) return;
-  if (c.near) { startStroke(c, c.near); return; } // 笔尖碰着方块：开始用手画线
-  if (c.hover?.userData.tile) { app.pulse(c, 0.3, 30); clickTile(c.hover.userData.tile); } // 射线点选
+  if (c.near) { startChain(c.near, c); if (chain) chain.mode = 'hand'; return; }
+  if (c.hover?.userData.dot) { startChain(c.hover.userData.dot, c); if (chain) chain.mode = 'ray'; }
 });
-app.on('selectend', (c) => { if (stroke?.c === c) cancelStroke(); });
-app.on('squeeze', (c) => {
-  initAudio();
-  grab = {
-    c,
-    invStart: c.grip.getWorldQuaternion(new THREE.Quaternion()).invert(),
-    startWorld: cluster.getWorldQuaternion(new THREE.Quaternion()),
-  };
-  app.pulse(c, 0.3, 30);
-});
-app.on('squeezeend', (c) => { if (grab?.c === c) grab = null; });
+app.on('selectend', (c) => { if (chain?.by === c) finishChain(); });
 
-// ================= 电脑上预览 =================
-camera.position.set(0, 1.55, 0.45);
+// ================= 电脑上预览：按住鼠标拖过去 =================
+camera.position.set(0, 1.35, 0.55);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.3, -0.5);
+controls.target.set(0, 1.25, -0.45);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
-let downAt = null;
-renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
-renderer.domElement.addEventListener('pointerup', (e) => {
-  if (app.presenting || !downAt) return;
-  const moved = Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]);
-  downAt = null;
-  if (moved > 6) return;
-  initAudio();
+function mouseHit(e) {
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   mouseRay.setFromCamera(mouse, camera);
-  const hit = mouseRay.intersectObjects([...uiButtons, ...alive().map((t) => t.mesh)], false)[0];
-  if (!hit) return;
-  if (hit.object.userData.ui) hit.object.userData.ui.onClick?.();
-  else clickTile(hit.object.userData.tile);
-});
-// 方向键转立方体
-window.addEventListener('keydown', (e) => {
+  return mouseRay.intersectObjects([...uiButtons, ...grid.flat().filter(Boolean).map((d) => d.mesh)], false)[0];
+}
+renderer.domElement.addEventListener('pointerdown', (e) => {
   if (app.presenting) return;
-  const r = 0.2;
-  const axis = { ArrowLeft: [0, 1, 0, -r], ArrowRight: [0, 1, 0, r], ArrowUp: [1, 0, 0, -r], ArrowDown: [1, 0, 0, r] }[e.key];
-  if (axis) { e.preventDefault(); cluster.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(axis[0], axis[1], axis[2]), axis[3])); }
-  if (e.key === 'h') showHint();
+  initAudio();
+  const hit = mouseHit(e);
+  if (!hit) return;
+  if (hit.object.userData.ui) { hit.object.userData.ui.onClick?.(); return; }
+  controls.enabled = false;
+  startChain(hit.object.userData.dot, 'mouse');
+  if (chain) chain.mode = 'mouse';
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+  if (app.presenting || chain?.by !== 'mouse') return;
+  const hit = mouseHit(e);
+  if (hit?.object.userData.dot) touchDot(hit.object.userData.dot);
+  if (hit) chain.cursor = board.worldToLocal(hit.point.clone());
+});
+window.addEventListener('pointerup', () => {
+  if (chain?.by === 'mouse') finishChain();
+  controls.enabled = true;
 });
 window.addEventListener('resize', () => {
-  for (const o of cluster.children) if (o.isLine2) o.material.resolution.set(innerWidth, innerHeight);
+  for (const o of board.children) if (o.isLine2) o.material.resolution.set(innerWidth, innerHeight);
 });
 
 // ================= 页面 =================
@@ -658,23 +583,25 @@ const btnAR = document.getElementById('enter-ar');
 const btnDesktop = document.getElementById('desktop');
 const note = document.getElementById('note');
 const envSelect = document.getElementById('env-select');
-const diffSelect = document.getElementById('diff-select');
+const modeSelect = document.getElementById('mode-select');
 let desktopPreview = false;
 for (const e of ENVIRONMENTS) envSelect.add(new Option(e.label, e.key));
 envSelect.value = savedEnvKey();
 envSelect.addEventListener('change', () => envs.set(envSelect.value));
-diffSelect.value = presetKey;
-diffSelect.addEventListener('change', () => newGame(diffSelect.value));
+mode = loadPref('dots-mode', 'endless') === 'timed' ? 'timed' : 'endless';
+nColors = loadPref('dots-colors', '5') === '6' ? 6 : 5;
+modeSelect.value = mode;
+modeSelect.addEventListener('change', () => newGame(modeSelect.value));
 
 (async () => {
   const [vr, ar] = await Promise.all([app.supports('immersive-vr'), app.supports('immersive-ar')]);
   btnVR.hidden = !vr;
   btnAR.hidden = !ar;
-  if (!vr && !ar) note.textContent = '这台设备不支持 VR。可以先在电脑上预览：点两个相同的方块连线，方向键转立方体，H 键提示。';
+  if (!vr && !ar) note.textContent = '这台设备不支持 VR。可以先在电脑上预览：按住鼠标从一个点拖过同色的点，松开就消掉。';
 })();
-async function start(mode) {
+async function start(m) {
   initAudio();
-  try { await app.enter(mode); } catch (err) { note.textContent = '无法进入：' + err.message; }
+  try { await app.enter(m); } catch (err) { note.textContent = '无法进入：' + err.message; }
 }
 btnVR.addEventListener('click', () => start('immersive-vr'));
 btnAR.addEventListener('click', () => start('immersive-ar'));
@@ -685,37 +612,12 @@ btnDesktop.addEventListener('click', () => {
   hint.style.display = 'block';
 });
 
-newGame(presetKey);
+newGame(mode, nColors);
 
 // 调试用
-window.linkgame = {
-  get state() { return state; }, get score() { return score; }, get combo() { return combo; },
-  get tiles() { return tiles; }, get stroke() { return stroke; },
-  cluster, rig, camera, controls, envs, newGame, findPath, anyPair, clickTile, match, showHint, shuffleTiles,
-  // 用一串（立方体局部坐标的）点模拟手画线
-  simulateStroke(from, localPts) {
-    stroke = { c: null, from, points: [from.mesh.position.clone()], line: makeLine('#9bf6ff') };
-    for (const p of localPts) {
-      if (!stroke) break;
-      const last = stroke.points[stroke.points.length - 1];
-      let hit = null, hitT = Infinity;
-      for (const t of tiles) {
-        if (!t.alive || t === from) continue;
-        const tt = segBox(last, p, t.mesh.position, HALF - (t.icon === from.icon ? -0.004 : FORGIVE));
-        if (tt !== null && tt < hitT) { hitT = tt; hit = t; }
-      }
-      if (hit) {
-        disposeLine(stroke.line);
-        const pts = [...stroke.points, hit.mesh.position.clone()];
-        stroke = null;
-        if (hit.icon === from.icon) { match(from, hit, pts); return 'matched'; }
-        flashLine(pts, '#ff4d4d', 0.5);
-        return 'blocked';
-      }
-      stroke.points.push(p.clone());
-      setLinePoints(stroke.line, stroke.points);
-    }
-    if (stroke) { cancelStroke(); }
-    return 'open';
-  },
+window.dotsgame = {
+  get state() { return state; }, get score() { return score; }, get grid() { return grid; }, get chain() { return chain; },
+  get combo() { return combo; },
+  newGame, startChain, touchDot, finishChain, hasMove, camera, controls, envs, rig,
+  setTime(t) { timeLeft = t; },
 };

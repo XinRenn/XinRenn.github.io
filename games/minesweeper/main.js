@@ -6,6 +6,7 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import * as G from '../../shared/geometry2d.js';
+import { createFeet } from '../../shared/feet.js';
 
 // ================= 可调参数 =================
 // size：石板之间的平均间距（米）；density：多少比例的石板下面有雷
@@ -19,7 +20,7 @@ const LAYOUTS = {
   drawn: '自己画',
   default: '面前 2×2',
 };
-const DWELL = 0.7;          // 站在一格上多少秒才翻开
+const DWELL = 1.5;          // 站在一格上多少秒才翻开（试玩反馈：0.7 秒太快）
 const GUARDIAN_INSET = 0.3; // 用安全边界时往里缩多少米，离墙远一点
 const ARM_DISTANCE = 0.3;   // 开局后要先走动多远才开始计算踩格子（防止一开始脚下那格被直接翻开）
 const GAP = 0.025;          // 石板之间的缝
@@ -75,6 +76,9 @@ const youMarker = new THREE.Mesh(
 youMarker.rotation.x = -Math.PI / 2;
 youMarker.visible = false;
 scene.add(youMarker);
+// 卡通脚：踩在哪一格一目了然
+const feet = createFeet();
+scene.add(feet.object);
 
 const flash = new THREE.Mesh(
   new THREE.SphereGeometry(0.3, 16, 12),
@@ -855,8 +859,9 @@ function onFrame(dt) {
       placeAfter -= dt;
       if (placeAfter <= 0) placeBoardInFront(false);
     }
-    youMarker.visible = true;
+    youMarker.visible = false;
     updateStanding(app.headPosition(tmpHead), dt);
+    feet.update(tmpHead, app.headForward(new THREE.Vector3()), 0.045, dt);
     updatePointers();
     app.pollButtons((c, bi) => {
       if (bi === 4) primaryAction();
@@ -864,6 +869,7 @@ function onFrame(dt) {
     });
   } else {
     youMarker.visible = false;
+    feet.hide();
     controls.update();
   }
 
