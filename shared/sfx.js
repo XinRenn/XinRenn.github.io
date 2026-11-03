@@ -125,6 +125,14 @@ export const sfx = {
   flag: () => tone({ freq: 300, to: 620, dur: 0.09, type: 'square', vol: 0.08 }),
   unflag: () => tone({ freq: 620, to: 300, dur: 0.09, type: 'square', vol: 0.08 }),
   click: () => tone({ freq: 1200, dur: 0.04, vol: 0.12 }),
+  // 镐子敲石头：清脆的“叮”+ 一点碎屑声，hard 越大越尖
+  pick: (hard = 0) => {
+    tone({ freq: 1300 + hard * 260, to: 900 + hard * 200, dur: 0.08, type: 'triangle', vol: 0.18 });
+    noise({ dur: 0.12, vol: 0.35, cutoff: 3200 });
+  },
+  crumble: () => { noise({ dur: 0.7, vol: 0.75, cutoff: 900 }); tone({ freq: 110, to: 55, dur: 0.4, vol: 0.3 }); },
+  smash: () => { noise({ dur: 0.25, vol: 0.55, cutoff: 2200 }); tone({ freq: 420, to: 160, dur: 0.12, type: 'square', vol: 0.06 }); },
+  whoosh: () => noise({ dur: 0.45, vol: 0.28, cutoff: 2600 }),
   warn: () => tone({ freq: 200, dur: 0.12, type: 'sawtooth', vol: 0.05 }),
   boom: () => {
     noise({ dur: 1.3, vol: 0.9, cutoff: 1500 });

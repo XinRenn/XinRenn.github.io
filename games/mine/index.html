@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>深井矿工</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1220; }
+    body { font-family: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif; color: #eef2fb; }
+    canvas { display: block; }
+    #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(13, 18, 32, 0.82); z-index: 10; overflow-y: auto; }
+    #overlay.hidden { display: none; }
+    .panel { width: 100%; max-width: 580px; background: #18213a; border: 1px solid #2a3658; border-radius: 20px; padding: 28px; }
+    h1 { margin: 0 0 4px; font-size: 34px; }
+    .tag { display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 999px; background: #f5b941; color: #0d1220; font-size: 14px; vertical-align: middle; }
+    .sub { margin: 0 0 18px; color: #9aa6c2; }
+    ol { margin: 0 0 20px; padding-left: 22px; line-height: 1.75; }
+    .choices { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 0 0 18px; }
+    .choices label { display: flex; align-items: center; gap: 8px; color: #c9d3ea; }
+    select { font: inherit; font-size: 16px; padding: 8px 12px; border-radius: 10px; background: #0f1628; color: #eef2fb; border: 1px solid #2a3658; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; }
+    button { font: inherit; font-size: 18px; font-weight: 700; border: 0; border-radius: 12px; padding: 14px 22px; cursor: pointer; color: #0d1220; background: #5cffb0; }
+    button.secondary { background: #2a3658; color: #eef2fb; }
+    button[hidden] { display: none; }
+    .note { font-size: 14px; color: #9aa6c2; margin: 0; }
+    a { color: #f5b941; }
+    #back { position: fixed; top: 12px; left: 12px; z-index: 5; font-size: 15px; }
+    #hint { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 5; font-size: 15px; color: #c9d3ea; background: rgba(13,18,32,0.7); padding: 8px 14px; border-radius: 10px; display: none; white-space: nowrap; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <a id="back" href="../../">← 返回大厅</a>
+  <div id="hint">点方块 = 用镐敲一下 · 拖动转视角 · 敲碎脚下中间那块就往下掉</div>
+  <div id="overlay">
+    <div class="panel">
+      <h1>深井矿工<span class="tag">样品</span></h1>
+      <p class="sub">你站在一口矿井里，手里拿着镐，一直往下挖。头顶不停有石块掉下来，挖慢了就会被埋住。</p>
+      <ol>
+        <li>两只手柄都是<b>镐</b>。<b>挥动手柄</b>砸方块（要用力挥，轻轻碰不算），每砸一下方块会裂开，砸够次数就碎了。</li>
+        <li>砸碎<b>脚下正中间</b>那块（镐头比手长，手不用碰到真的地板），整层就塌了，你往下<b>掉一层</b>（0.6 米），四周堆的碎石也会塌掉一半。越往下石头越硬。</li>
+        <li>头顶会<b>不停掉石块</b>，红圈提示它要落在哪里。四周的石堆可以一下砸掉；正对你头顶的那块要么在空中砸碎，要么<b>歪头躲开</b>，不然扣一颗心。四周堆满了你就被<b>埋住</b>了。石块掉得越来越快，所以要不停往下挖。</li>
+        <li>闪光的<b>宝石矿</b>和<b>金矿</b>加分，红色的<b>炸药箱</b>砸一下会把周围一圈都炸开。</li>
+        <li>得分 = 深度 + 矿石。按 <b>A / X</b> 重新开始，<b>B / Y</b> 把矿井对准你脚下。</li>
+      </ol>
+      <div class="choices">
+        <label>地面背景 <select id="env-select"></select></label>
+      </div>
+      <div class="buttons">
+        <button id="enter-vr" hidden>进入 VR</button>
+        <button id="enter-ar" hidden>进入混合现实</button>
+        <button id="desktop" class="secondary">在电脑上预览</button>
+      </div>
+      <p class="note" id="note">这是样品，先试试手感。挥镐前确认四周没有人和东西，抓紧手柄、戴好腕带。</p>
+    </div>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
