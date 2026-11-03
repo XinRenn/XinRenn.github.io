@@ -197,10 +197,15 @@ const rubbleGeo = new THREE.BoxGeometry(C * 0.96, C * 0.96, C * 0.96);
 const WALL_LEN = 400;
 const wallMat = new THREE.MeshStandardMaterial({ map: TEX.wall, roughness: 0.95 });
 TEX.wall.repeat.set(3, WALL_LEN / C);
+// 左右两面墙往你身后多延伸 3 米：VR 里被后墙挡住看不见，电脑预览从背后看时不会露出天空
+const wallMatSide = wallMat.clone();
+wallMatSide.map = TEX.wall.clone();
+wallMatSide.map.repeat.set((3 * C + 3) / C, WALL_LEN / C);
 for (let s = 0; s < 4; s++) {
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(3 * C, WALL_LEN), wallMat);
+  const side = s % 2 === 1;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(side ? 3 * C + 3 : 3 * C, WALL_LEN), side ? wallMatSide : wallMat);
   const a = s * Math.PI / 2;
-  m.position.set(-Math.sin(a) * 1.5 * C, -WALL_LEN / 2, -Math.cos(a) * 1.5 * C);
+  m.position.set(-Math.sin(a) * 1.5 * C, -WALL_LEN / 2, side ? 1.5 : -Math.cos(a) * 1.5 * C);
   m.rotation.y = a;
   shaft.add(m);
 }
@@ -709,6 +714,7 @@ function onFrame(dt) {
   if (env) env.group.visible = !isAR && depthVis * C < 30;
   const z = zoneOf(depth);
   wallMat.color.lerp(fogColor.set(z.wall), Math.min(1, dt * 1.5));
+  wallMatSide.color.copy(wallMat.color);
   caveLight.intensity = 0.35 + Math.min(0.5, depthVis * 0.04);
   caveLight.groundColor.set(z.from >= 35 ? '#a8361a' : '#3a2a1c');
 
