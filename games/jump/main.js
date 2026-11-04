@@ -1,5 +1,6 @@
-// 蓄力跳台（第一人称跑酷版）：你站在一根真实大小的“梅花桩”上，前面是一排跳台。
-// 蹲下蓄力、站起来起跳——你本人不动，整个世界往后退，就像真的跳了过去。没踩中就往下掉。
+// 蓄力跳台（第一人称跑酷版）：你站在一根真实大小的“梅花桩”上，周围很多方向都有跳台。
+// 按住握把、蹲下蓄力（蹲得越深跳得越远，站起来就减少，可以反悔），松开握把就往你面对的方向跳——
+// 你本人不动，整个世界往后退，就像真的跳了过去。没踩中就显示“你掉下去了”。
 // 跳台的样子随背景变化（荷叶、石头、浮冰、木桩、屋顶……），造型来自 themes.js。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -8,6 +9,7 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio, chargeTone } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { createFeet } from '../../shared/feet.js';
+import { makeExitButton } from '../../shared/exit.js';
 import { THEMES } from './themes.js';
 
 // ================= 可调参数 =================
@@ -17,7 +19,10 @@ const CROUCH_FULL = 0.5;     // 下降多少米算满蓄力
 const TRIGGER_FULL = 1.1;    // 扳机按住多少秒算满蓄力
 const JUMP_MIN = 0.3, JUMP_MAX = 3.2; // 蓄力 0 → 1 对应的跳跃距离（米）
 const PERFECT = 0.16;        // 落点离中心 < 跳台尺寸 × 这个比例 = 正中靶心
-const AHEAD = 5;             // 前方保持几个跳台
+const NEIGHBORS = 4;         // 脚下这个跳台周围保持几个跳得到的新跳台
+const SPREAD = 1.95;         // 新跳台出现在“前方”左右多大角度内（弧度，约 ±110°）
+const LANE = 5.5;            // 跳台离中线最远多少米（背景里这条带子是空的）
+const MR_ENV_OPACITY = 0.5;  // 混合现实里背景的可见度
 const BASE = { water: -0.08, sink: -0.38, ground: -0.5 }; // 各主题“底面”的高度（小模型单位）
 const WRAP = { default: 26, waterfall: 9 };               // 背景跟着往后退多远之后悄悄挪回来
 
@@ -45,8 +50,11 @@ const envs = createEnvManager(scene, {
 });
 envs.set(savedEnvKey());
 
+let isAR = false;
 app.on('modechange', (mode) => {
-  envs.setAR(mode === 'ar');
+  isAR = mode === 'ar';
+  envs.setAR(false); // 混合现实里背景不藏起来，而是变成半透明（见 applyEnvOpacity）
+  applyEnvOpacity();
   overlay.classList.toggle('hidden', mode !== 'desktop' || desktopPreview);
   backLink.style.display = mode === 'desktop' ? '' : 'none';
   hint.style.display = mode === 'desktop' && desktopPreview ? 'block' : 'none';
@@ -118,7 +126,27 @@ function applyTheme(key) {
     clearCorridor(env.group);
   }
   buildBase();
+  applyEnvOpacity();
   newGame();
+}
+
+// 混合现实：背景和水面调成半透明，能透过去看到真实的房间；跳台保持不透明
+function applyEnvOpacity() {
+  const k = isAR ? MR_ENV_OPACITY : 1;
+  scene.fog = isAR ? null : envs.current?.fog || null;
+  const groups = [envs.current?.group, baseStrip].filter(Boolean);
+  for (const g of groups) g.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (!m.userData.base) m.userData.base = { o: m.opacity, t: m.transparent, dw: m.depthWrite };
+      const b = m.userData.base;
+      m.transparent = k < 1 || b.t;
+      m.opacity = b.o * k;
+      m.depthWrite = k < 1 ? false : b.dw;
+      if (m.uniforms?.opacityK) m.uniforms.opacityK.value = k;
+      m.needsUpdate = true;
+    }
+  });
 }
 
 // 把背景里落在通道（|x| < 4.5 米）内的树、草、石头等批量物体隐藏起来
@@ -129,7 +157,7 @@ function clearCorridor(group) {
     for (let i = 0; i < o.count; i++) {
       o.getMatrixAt(i, m);
       p.setFromMatrixPosition(m);
-      if (Math.abs(p.x) < 4.5 && p.z < 12) o.setMatrixAt(i, zero);
+      if (Math.abs(p.x) < LANE + 2 && p.z < 12) o.setMatrixAt(i, zero);
     }
     o.instanceMatrix.needsUpdate = true;
   });
@@ -146,12 +174,12 @@ function buildBase() {
   }[themeKey] || ['#1f4558', '#8db8cc'];
   const mat = new THREE.ShaderMaterial({
     transparent: true,
-    uniforms: { uTime, deep: { value: new THREE.Color(colors[0]) }, light: { value: new THREE.Color(colors[1]) }, water: { value: kind === 'water' ? 1 : 0 }, street: { value: kind === 'ground' ? 1 : 0 } },
+    uniforms: { uTime, opacityK: { value: 1 }, deep: { value: new THREE.Color(colors[0]) }, light: { value: new THREE.Color(colors[1]) }, water: { value: kind === 'water' ? 1 : 0 }, street: { value: kind === 'ground' ? 1 : 0 } },
     vertexShader: /* glsl */ `
       varying vec3 vW; varying vec2 vL;
       void main() { vL = position.xy; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
     fragmentShader: /* glsl */ `
-      uniform float uTime, water, street; uniform vec3 deep, light; varying vec3 vW; varying vec2 vL;
+      uniform float uTime, water, street, opacityK; uniform vec3 deep, light; varying vec3 vW; varying vec2 vL;
       void main() {
         vec3 c;
         if (water > 0.5) {
@@ -167,12 +195,12 @@ function buildBase() {
         } else {
           c = mix(deep, light, 0.5 + 0.5 * sin(vL.x * 1.3) * sin(vL.y * 0.9));
         }
-        float edge = smoothstep(4.6, 3.6, abs(vL.x));
-        gl_FragColor = vec4(c, (water > 0.5 ? 0.93 : 1.0) * edge);
+        float edge = smoothstep(7.2, 6.2, abs(vL.x));
+        gl_FragColor = vec4(c, (water > 0.5 ? 0.93 : 1.0) * edge * opacityK);
         #include <colorspace_fragment>
       }`,
   });
-  baseStrip = new THREE.Mesh(new THREE.PlaneGeometry(9.2, 600), mat);
+  baseStrip = new THREE.Mesh(new THREE.PlaneGeometry(14.4, 600), mat);
   baseStrip.rotation.x = -Math.PI / 2;
   baseStrip.position.set(0, surfaceY + 0.005, -280);
   course.add(baseStrip);
@@ -218,30 +246,36 @@ function contains(p, x, z) {
   return Math.hypot(dx, dz) <= p.w / 2;
 }
 
-// 前方一直保持几个跳台：大致往前（-z），左右错开，离中线不太远
-function spawnAhead() {
-  let last = platforms[platforms.length - 1];
-  while (platforms.filter((p) => !p.dying && p.z <= cur.z + 0.01).length < AHEAD + 1) {
+// 跳台铺成一片：每个跳台周围（前方和左右，大约 ±110°）都有几个跳得到的新跳台，往哪边跳都行
+const reachable = (p) => platforms.filter((q) => q !== p && !q.dying && !q.visited && Math.hypot(q.x - p.x, q.z - p.z) <= JUMP_MAX * 0.92);
+function spawnAround(p, want) {
+  for (let tries = 0; reachable(p).length < want && tries < 40; tries++) {
     const k = Math.min(score, 40) / 40;
     const size = THREE.MathUtils.lerp(0.18, 0.12, k) + Math.random() * 0.05;
-    const p = buildPlatform(size, score > 2 && Math.random() < 0.1);
-    let ang = (Math.random() - 0.5) * 1.1;
-    if (Math.abs(last.x) > 1.8) ang = -Math.sign(last.x) * Math.abs(ang); // 别偏离中线太远
-    const minD = (extent(last) + extent(p)) * 0.55 + 0.3;
-    const maxD = Math.max(minD + 0.3, THREE.MathUtils.lerp(2.0, 2.8, k));
+    const q = buildPlatform(size, score > 2 && Math.random() < 0.1);
+    const ang = (Math.random() - 0.5) * 2 * SPREAD;
+    const minD = (extent(p) + extent(q)) * 0.55 + 0.3;
+    const maxD = Math.max(minD + 0.3, THREE.MathUtils.lerp(2.2, 2.85, k));
     const d = minD + Math.random() * (maxD - minD);
-    place(p, last.x + Math.sin(ang) * d, last.z - Math.cos(ang) * d);
-    p.born = 0.001;
-    last = p;
+    const x = p.x + Math.sin(ang) * d, z = p.z - Math.cos(ang) * d;
+    const ok = Math.abs(x) < LANE && z < cur.z + 1.5 &&
+      platforms.every((o) => o === q || o.dying || Math.hypot(o.x - x, o.z - z) >= (extent(o) + extent(q)) * 0.55 + 0.35);
+    if (!ok) { course.remove(q.group); disposeTree(q.group); platforms.pop(); continue; }
+    place(q, x, z);
+    q.born = 0.001;
   }
 }
-const nextPlatform = () => {
-  const i = platforms.indexOf(cur);
-  return platforms.slice(i + 1).find((p) => !p.dying) || null;
-};
+function refreshField() {
+  spawnAround(cur, NEIGHBORS);
+  for (const q of reachable(cur)) spawnAround(q, 2);
+  // 离得太远的、在身后的跳台沉下去
+  for (const p of platforms) if (p !== cur && !p.dying && (Math.hypot(p.x - cur.x, p.z - cur.z) > 9 || p.z > cur.z + 4)) p.dying = 0.001;
+}
+// 离你最近、还没去过的跳台（电脑预览/测试用）
+const nextPlatform = () => reachable(cur).sort((a, b) => Math.hypot(a.x - pos.x, a.z - pos.z) - Math.hypot(b.x - pos.x, b.z - pos.z))[0] || null;
 
 // ================= 游戏状态 =================
-let state = 'idle';  // idle | charging | jumping | falling | over
+let state = 'idle';  // idle | charging | jumping | over
 let score = 0, best = Number(loadPref('jump-best2', '0')) || 0, combo = 0;
 let charge = 0, chargeMode = null, chargeT = 0, maxDepth = 0;
 let tone = null;
@@ -258,16 +292,18 @@ function newGame() {
   score = 0; combo = 0;
   cur = buildPlatform(0.24);
   place(cur, 0, 0);
+  cur.visited = true;
   pos.set(0, cur.h, 0);
-  spawnAhead();
+  refreshField();
   for (const p of platforms) p.born = 0;
+  overMsg.mesh.visible = false;
   envWrap.set(0, 0, 0);
   state = 'idle';
   stopCharge(false);
   jump = null;
   vignette.black.material.opacity = 0;
   updateWorld(0, 0);
-  setStatus(crouchEnabled ? `${theme.name}：站直，然后蹲下蓄力` : `${theme.name}：按住扳机蓄力`);
+  setStatus(crouchEnabled ? `${theme.name}：按住握把蹲下蓄力，松开起跳` : `${theme.name}：按住扳机蓄力`);
   sfx.click();
 }
 function disposeTree(o) {
@@ -296,20 +332,29 @@ function stopCharge(release = true) {
   tone = null;
   if (state !== 'charging') return;
   if (release && charge > 0.02) doJump(charge);
-  else state = 'idle';
+  else { state = 'idle'; if (release && chargeMode === 'grip') setStatus('没蹲下去：按住握把、蹲下，再松开'); }
   chargeMode = null;
+}
+// 你面对的方向（跳台坐标里，水平）
+function facingDir() {
+  const f = app.presenting ? app.headForward(new THREE.Vector3()) : camera.getWorldDirection(new THREE.Vector3()).setY(0).normalize();
+  return f.applyAxisAngle(new THREE.Vector3(0, 1, 0), -world.rotation.y).setY(0).normalize();
+}
+const jumpDist = (power) => JUMP_MIN + power * (JUMP_MAX - JUMP_MIN);
+function platformAt(x, z) {
+  for (const p of platforms) if (!p.dying && contains(p, x, z)) return p;
+  return null;
 }
 function setCharge(v) { charge = THREE.MathUtils.clamp(v, 0, 1); tone?.set(charge); }
 
-function doJump(power) {
-  const next = nextPlatform();
-  if (!next) { state = 'idle'; return; }
+// 往你面对的方向跳（试玩反馈：朝错了方向就会跳错）
+function doJump(power, dirOverride = null) {
   const from = pos.clone();
-  const dir = new THREE.Vector3(next.x - from.x, 0, next.z - from.z).normalize();
-  const dist = JUMP_MIN + power * (JUMP_MAX - JUMP_MIN);
+  const dir = dirOverride ? dirOverride.clone().setY(0).normalize() : facingDir();
+  const dist = jumpDist(power);
   const land = from.clone().addScaledVector(dir, dist);
-  let target = null;
-  for (const p of platforms) if (!p.dying && contains(p, land.x, land.z)) { target = p; break; }
+  const target = platformAt(land.x, land.z);
+  const next = target;
   const endY = target ? target.h : from.y;
   const T = 0.5 + dist * 0.07;
   const peak = 0.3 + dist * 0.12;
@@ -327,7 +372,13 @@ function finishLanding() {
   pos.set(jump.land.x, t.h, jump.land.z);
   sfx.land();
   app.pulseAll(0.7, 70);
-  if (t !== cur) {
+  if (t !== cur && t.visited) {
+    combo = 0;
+    cur = t;
+    refreshField();
+    setStatus('跳回了去过的跳台（不加分）');
+  } else if (t !== cur) {
+    t.visited = true;
     const off = Math.hypot(jump.land.x - t.x, jump.land.z - t.z);
     let gained = 1, label = '+1';
     if (off <= Math.min(t.w, t.d) * PERFECT) {
@@ -338,14 +389,10 @@ function finishLanding() {
       ripple(t.x, t.h + 0.01, t.z);
     } else combo = 0;
     if (t.bonus && t.coin) { gained += 5; label += '  金币 +5'; sfx.bonus(); t.coin.visible = false; t.coin = null; }
-    // 跳过了中间的跳台（跳得特别远）也算数
-    const skipped = platforms.slice(platforms.indexOf(cur) + 1, platforms.indexOf(t)).filter((p) => !p.dying).length;
-    if (skipped > 0) { gained += skipped; label += `  跳过 ${skipped} 个`; }
     score += gained;
     popup(label);
-    for (const p of platforms) if (platforms.indexOf(p) < platforms.indexOf(t) - 1) p.dying = p.dying || 0.001;
     cur = t;
-    spawnAhead();
+    refreshField();
     setStatus(combo > 1 ? `连续靶心 ${combo} 次！` : '漂亮！继续');
   } else {
     setStatus('跳近了，还在原来的跳台上');
@@ -354,40 +401,36 @@ function finishLanding() {
   jump = null;
 }
 
+// 没踩中：不放下坠动画（试玩反馈：太吓人），视野变暗，直接显示“你掉下去了”
 function startFall() {
-  state = 'falling';
-  jump.fall = { vy: 0, y: 0, t: 0 };
   combo = 0;
-  sfx.fall();
-}
-function updateFall(dt) {
-  const f = jump.fall;
-  f.t += dt;
-  const kind = theme.fall;
-  if (kind === 'sink') f.vy = Math.max(f.vy - 2 * dt, -0.9);
-  else f.vy -= 9.8 * dt;
-  f.y += f.vy * dt;
-  // 你往下掉 = 世界往上升
-  const floor = surfaceY - jump.endY - (kind === 'water' ? 1.4 : 0.15); // 水里沉到水面下，街道/沙地上摔到底
-  if (f.y <= floor) {
-    f.y = floor;
-    if (!f.splashed) {
-      f.splashed = true;
-      if (kind === 'water') { sfx.thud(); splashFx(); } else sfx.thud();
-      app.pulseAll(1, 300);
-    }
-  }
-  pos.set(jump.land.x, jump.endY, jump.land.z);
-  updateWorld(-f.y, 0);
-  vignette.black.material.opacity = Math.min(0.85, Math.max(0, (f.t - 0.4) * 1.2));
-  if (f.t > 1.4) gameOver();
-}
-function gameOver() {
   state = 'over';
+  jump = null;
+  sfx.thud();
+  app.pulseAll(0.6, 150);
   const record = score > best;
   if (record) { best = score; savePref('jump-best2', String(best)); }
+  overMsg.redraw((ctx, w, h) => {
+    roundRect(ctx, 6, 6, w - 12, h - 12, 50);
+    ctx.fillStyle = 'rgba(18, 25, 44, 0.95)'; ctx.fill();
+    ctx.lineWidth = 8; ctx.strokeStyle = '#ff8a8a'; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.font = `800 110px ${FONT}`;
+    ctx.fillText('你掉下去了', w / 2, h * 0.32);
+    ctx.fillStyle = '#f5b941'; ctx.font = `700 64px ${FONT}`;
+    ctx.fillText(record ? `新纪录 ${score} 分！` : `得分 ${score} · 最佳 ${best}`, w / 2, h * 0.58);
+    ctx.fillStyle = '#c9d3ea'; ctx.font = `600 46px ${FONT}`;
+    ctx.fillText('按 A/X 或扳机再来一局', w / 2, h * 0.8);
+  });
+  overMsg.mesh.visible = true;
   setStatus(record ? `新纪录 ${score} 分！按 A/X 再来` : `掉下去了！得分 ${score}，按 A/X 再来`);
 }
+const overMsg = makeCanvasPlane(1.0, 0.5, 1000);
+overMsg.mesh.position.set(0, 1.5, -1.3);
+overMsg.mesh.material.depthTest = false;
+overMsg.mesh.renderOrder = 1002;
+overMsg.mesh.visible = false;
+hud.add(overMsg.mesh);
 
 // ================= 特效 =================
 function ripple(x, y, z) {
@@ -461,8 +504,16 @@ mk('重新开始  A/X', -0.225, -0.25, '#3a5bd9', () => newGame());
 mk('对准前方  B/Y', 0.225, -0.25, '#3a5bd9', () => placeInFront());
 const crouchButton = mk('', -0.225, -0.35, '#2e5a46', () => toggleCrouch());
 const comfortButton = mk('', 0.225, -0.35, '#2e5a46', () => toggleComfort());
-const envButton = mk('背景：… ▶', 0, -0.45, '#5a4a2e', () => envs.next(), 0.88);
+const envButton = mk('背景：… ▶', -0.225, -0.45, '#5a4a2e', () => envs.next());
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
+const aimButton = mk('', 0.225, -0.45, '#2e5a46', () => { aimHelp = !aimHelp; savePref('jump-aim', aimHelp ? '1' : '0'); refreshToggles(); });
+let aimHelp = loadPref('jump-aim', '1') === '1';
+{
+  const exitButton = makeExitButton(app, { width: 0.43, height: 0.085 });
+  exitButton.position.set(0, -0.55, 0);
+  panelGroup.add(exitButton);
+  uiButtons.push(exitButton);
+}
 function toggleCrouch() {
   crouchEnabled = !crouchEnabled;
   savePref('jump-crouch', crouchEnabled ? '1' : '0');
@@ -474,8 +525,9 @@ function toggleComfort() {
   refreshToggles();
 }
 function refreshToggles() {
-  crouchButton.userData.ui.setLabel(crouchEnabled ? '蹲下蓄力：开' : '蹲下蓄力：关');
+  crouchButton.userData.ui.setLabel(crouchEnabled ? '握把+蹲下：开' : '握把+蹲下：关');
   comfortButton.userData.ui.setLabel(comfort ? '防晕暗角：开' : '防晕暗角：关');
+  aimButton?.userData.ui.setLabel(aimHelp ? '落点提示：开' : '落点提示：关');
 }
 refreshToggles();
 
@@ -527,22 +579,29 @@ const headHist = [];
 let clockT = 0;
 let crouchArmed = true;
 function standHeight() { return headHist.length ? Math.max(...headHist.map((h) => h[1])) : 1.6; }
+// 按住握把时：蹲得越深蓄力越大，站起来就变小（随时可以反悔）；两只手的握把都松开才起跳
 function updateCrouch(headY, dt) {
   clockT += dt;
   if (state !== 'charging') {
     headHist.push([clockT, headY]);
     while (headHist.length && clockT - headHist[0][0] > 2.5) headHist.shift();
   }
-  if (!crouchEnabled || headHist.length < 20) return;
-  const depth = standHeight() - headY;
-  if (depth < CROUCH_START * 0.6) crouchArmed = true;
-  if (state === 'idle' && crouchArmed && depth > CROUCH_START) { crouchArmed = false; startCharge('crouch'); }
-  if (state === 'charging' && chargeMode === 'crouch') {
-    maxDepth = Math.max(maxDepth, depth);
-    setCharge((maxDepth - CROUCH_START) / (CROUCH_FULL - CROUCH_START));
-    if (depth < maxDepth - Math.max(0.08, maxDepth * 0.4) || depth < CROUCH_START * 0.5) stopCharge(true);
+  if (state === 'charging' && chargeMode === 'grip') {
+    const depth = standHeight() - headY;
+    setCharge((depth - CROUCH_START) / (CROUCH_FULL - CROUCH_START));
   }
 }
+const gripHeld = () => app.controllers.some((c) => c.gripHeld);
+app.on('squeeze', (c) => {
+  initAudio();
+  c.gripHeld = true;
+  if (state === 'over') return;
+  if (crouchEnabled && state === 'idle') startCharge('grip');
+});
+app.on('squeezeend', (c) => {
+  c.gripHeld = false;
+  if (!gripHeld() && state === 'charging' && chargeMode === 'grip') stopCharge(true);
+});
 
 // 蓄力圈：画在脚下
 const chargeRing = new THREE.Mesh(
@@ -551,6 +610,29 @@ const chargeRing = new THREE.Mesh(
 );
 chargeRing.rotation.x = -Math.PI / 2;
 scene.add(chargeRing);
+
+// 落点提示：从脚下沿你面对的方向画一条虚线，蓄力时末端的圆圈就是会落到的地方（试玩反馈：判断距离）
+const aimLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]), new THREE.LineDashedMaterial({ color: '#ffffff', dashSize: 0.12, gapSize: 0.08, transparent: true, opacity: 0.7, depthWrite: false }));
+aimLine.computeLineDistances();
+course.add(aimLine);
+const aimSpot = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.14, 40), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }));
+aimSpot.rotation.x = -Math.PI / 2;
+course.add(aimSpot);
+function updateAim() {
+  const show = aimHelp && (state === 'idle' || state === 'charging') && !!theme;
+  aimLine.visible = show;
+  aimSpot.visible = show && state === 'charging';
+  if (!show) return;
+  const dir = facingDir();
+  const len = state === 'charging' ? jumpDist(charge) : JUMP_MIN + 0.5;
+  const a = new THREE.Vector3(pos.x, pos.y + 0.02, pos.z).addScaledVector(dir, 0.25);
+  const b = new THREE.Vector3(pos.x, pos.y + 0.02, pos.z).addScaledVector(dir, len);
+  const t = platformAt(b.x, b.z);
+  if (t) b.y = t.h + 0.02; else b.y = surfaceY + 0.02;
+  aimLine.geometry.setFromPoints([a, b]);
+  aimLine.computeLineDistances();
+  aimSpot.position.copy(b);
+}
 
 // ================= 每一帧 =================
 const tmpHead = new THREE.Vector3(), tmpF = new THREE.Vector3();
@@ -569,13 +651,13 @@ function onFrame(dt) {
       if (bi === 4) newGame();
       if (bi === 5) placeInFront();
     });
-    feet.update(tmpHead, tmpF, 0.005, dt);
+    feet.update(app.footPosition(new THREE.Vector3()), tmpF, 0.005, dt);
   } else {
     feet.hide();
     controls.update();
   }
 
-  if (state === 'charging' && chargeMode !== 'crouch') { chargeT += dt; setCharge(chargeT / TRIGGER_FULL); }
+  if (state === 'charging' && chargeMode !== 'grip') { chargeT += dt; setCharge(chargeT / TRIGGER_FULL); }
   if (state === 'charging' && Math.random() < dt * 20) app.pulseAll(0.1 + charge * 0.5, 20);
 
   // 新跳台从上面落下来，旧跳台沉下去消失
@@ -619,13 +701,13 @@ function onFrame(dt) {
       if (jump.target) finishLanding();
       else startFall();
     }
-  } else if (state === 'falling') {
-    updateFall(dt);
   } else if (state === 'charging' || state === 'idle') {
     updateWorld(0, 0);
   }
-  if (state !== 'falling' && state !== 'over' && vignette.black.material.opacity > 0) vignette.black.material.opacity = Math.max(0, vignette.black.material.opacity - dt * 5);
-  const vWant = comfort && (state === 'jumping' || state === 'falling') ? 0.9 : 0;
+  if (state === 'over') vignette.black.material.opacity = Math.min(0.7, vignette.black.material.opacity + dt * 3);
+  else if (vignette.black.material.opacity > 0) vignette.black.material.opacity = Math.max(0, vignette.black.material.opacity - dt * 5);
+  const vWant = comfort && state === 'jumping' ? 0.9 : 0;
+  updateAim();
   vignette.m.material.opacity += (vWant - vignette.m.material.opacity) * Math.min(1, dt * 10);
 
   // 脚下的蓄力圈
@@ -633,7 +715,8 @@ function onFrame(dt) {
   if (chargeRing.visible) {
     chargeRing.geometry.dispose();
     chargeRing.geometry = new THREE.RingGeometry(0.28, 0.33, 64, 1, Math.PI / 2, Math.max(0.001, charge * Math.PI * 2));
-    chargeRing.position.set(tmpHead.x, 0.01, tmpHead.z);
+    const fp = app.presenting ? app.footPosition(new THREE.Vector3()) : tmpHead;
+    chargeRing.position.set(fp.x, 0.01, fp.z);
     chargeRing.material.color.setHSL(0.38 - charge * 0.38, 0.9, 0.6);
   }
 
@@ -666,7 +749,8 @@ function updatePointers() {
 app.on('select', (c) => {
   initAudio();
   if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
-  if (state === 'over') return;
+  if (state === 'over') { newGame(); return; }
+  if (chargeMode === 'grip') return;
   c.charging = true;
   startCharge('trigger');
 });
@@ -739,7 +823,9 @@ window.jumpgame = {
   get state() { return state; }, get score() { return score; }, get combo() { return combo; },
   get cur() { return cur; }, get next() { return nextPlatform(); }, get pos() { return pos; }, get theme() { return themeKey; },
   get charge() { return charge; }, get platforms() { return platforms; },
-  startCharge, stopCharge, setCharge, newGame, updateCrouch, doJump, camera, controls, envs, world,
+  startCharge, stopCharge, setCharge, newGame, updateCrouch, doJump, camera, controls, envs, world, reachable, applyEnvOpacity,
+  setAR(v) { isAR = v; applyEnvOpacity(); },
+  jumpTo(p, power) { const d = new THREE.Vector3(p.x - pos.x, 0, p.z - pos.z); const dist = d.length(); doJump(power ?? (dist - JUMP_MIN) / (JUMP_MAX - JUMP_MIN), d); },
   idealPower() {
     const n = nextPlatform();
     const d = Math.hypot(n.x - pos.x, n.z - pos.z);

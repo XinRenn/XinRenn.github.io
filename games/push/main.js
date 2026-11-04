@@ -8,6 +8,10 @@ import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/in
 import { makePawn } from '../jump/themes.js';
 import { HANDMADE, parse, step, solved, solve, generate, DIRS } from './levels.js';
 import { createFeet } from '../../shared/feet.js';
+import { makeExitButton } from '../../shared/exit.js';
+import { createWristMap } from '../../shared/wrist.js';
+import { fitRect } from '../../shared/room.js';
+import { safeInset, area as polyArea } from '../../shared/geometry2d.js';
 
 // ================= 可调参数 =================
 const CELL = 0.45;        // 每格边长（米）
@@ -35,7 +39,15 @@ app.on('modechange', (mode) => {
   overlay.classList.toggle('hidden', mode !== 'desktop' || desktopPreview);
   backLink.style.display = mode === 'desktop' ? '' : 'none';
   hint.style.display = mode === 'desktop' && desktopPreview ? 'block' : 'none';
-  if (mode !== 'desktop') placeAfter = 0.6;
+  if (mode !== 'desktop') { placeAfter = 0.6; guardianPoly = null; }
+});
+// 安全边界：关卡一定放在它里面（试玩反馈：之前会超出去）
+let guardianPoly = null;
+app.on('bounds', (pts) => {
+  const poly = safeInset(pts, 0.2);
+  if (polyArea(poly) < 1) return;
+  guardianPoly = poly;
+  if (steps === 0 && level) placeLevel(false);
 });
 
 function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } }
@@ -130,10 +142,12 @@ const hintArrow = (() => {
 
 const cellLocal = (k, y = 0) => new THREE.Vector3((k % level.w) * CELL, y, Math.floor(k / level.w) * CELL);
 
-function loadLevel(i) {
+function loadLevel(i, preset = null) {
   levelIndex = Math.max(0, i);
   savePref('push-level', String(levelIndex));
-  if (levelIndex < HANDMADE.length) {
+  if (preset) {
+    level = preset;
+  } else if (levelIndex < HANDMADE.length) {
     level = parse(HANDMADE[levelIndex].map, `${levelIndex + 1}. ${HANDMADE[levelIndex].name}`);
   } else {
     const g = generate({ minSteps: 12, boxes: Math.random() < 0.5 ? 2 : 3 }) || parse(HANDMADE[HANDMADE.length - 1].map, '随机关卡');
@@ -145,7 +159,7 @@ function loadLevel(i) {
   state = 'playing';
   physCell = null;
   buildLevel();
-  placeLevel(false);
+  if (placeLevel(false) === false) return; // 放不下，已经换成别的关卡
   refreshButtons();
   if (!app.presenting) {
     // 电脑上：镜头对准关卡中间
@@ -158,25 +172,37 @@ function loadLevel(i) {
   sfx.click();
 }
 
-function buildLevel() {
-  levelGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
-  levelGroup.clear();
-  boxMeshes = []; goalMeshes = []; floorMeshes = [];
-  const { w, h, walls } = level;
-  // 从起点能走到的地方铺地砖
-  const inside = new Set([level.player]);
-  const q = [level.player];
+// 从起点能走到的格子（地砖）
+function floorCells(lv) {
+  const inside = new Set([lv.player]);
+  const q = [lv.player];
   while (q.length) {
     const k = q.pop();
     for (const [dx, dy] of Object.values(DIRS)) {
-      const x = (k % w) + dx, y = Math.floor(k / w) + dy;
-      if (x < 0 || y < 0 || x >= w || y >= h) continue;
-      const n = y * w + x;
-      if (walls.has(n) || inside.has(n)) continue;
+      const x = (k % lv.w) + dx, y = Math.floor(k / lv.w) + dy;
+      if (x < 0 || y < 0 || x >= lv.w || y >= lv.h) continue;
+      const n = y * lv.w + x;
+      if (lv.walls.has(n) || inside.has(n)) continue;
       inside.add(n);
       q.push(n);
     }
   }
+  return inside;
+}
+// 关卡里能走的范围（rig 坐标的长方形），用来塞进安全边界
+function levelRect(lv) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const k of floorCells(lv)) { const x = k % lv.w, y = Math.floor(k / lv.w); x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  return { x0: (x0 - 0.5) * CELL, x1: (x1 + 0.5) * CELL, z0: (y0 - 0.5) * CELL, z1: (y1 + 0.5) * CELL };
+}
+
+function buildLevel() {
+  levelGroup.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+  levelGroup.clear();
+  boxMeshes = []; goalMeshes = []; floorMeshes = [];
+  const { w, walls } = level;
+  // 从起点能走到的地方铺地砖
+  const inside = floorCells(level);
   const floorGeo = new THREE.BoxGeometry(CELL * 0.98, 0.02, CELL * 0.98);
   for (const k of inside) {
     const m = new THREE.Mesh(floorGeo, mats.floor);
@@ -240,17 +266,51 @@ function refreshBoxes(silent = false) {
 
 // 把关卡放好：你现在站的地方 = 起点格子，关卡朝你面对的方向展开
 let placeAfter = -1;
+let needStart = false;   // 关卡挪过位置后，要先走到起点（小人那一格）才开始认身体
 function placeLevel(withSound = true) {
-  const head = app.headPosition(new THREE.Vector3());
-  const f = app.headForward(new THREE.Vector3());
-  if (!app.presenting) { head.set(0, 1.6, 0); f.set(0, 0, -1); }
+  const head = app.presenting ? app.footPosition(new THREE.Vector3()) : new THREE.Vector3(0, 0, 0);
+  const f = app.presenting ? app.headForward(new THREE.Vector3()) : new THREE.Vector3(0, 0, -1);
   const yaw = Math.atan2(-f.x, -f.z);
-  rig.rotation.set(0, yaw, 0);
-  const local = cellLocal(st.player);
-  local.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-  rig.position.set(head.x - local.x, 0, head.z - local.z);
+  const local = cellLocal(st.player).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+  const want = [head.x - local.x, head.z - local.z]; // 起点正好在你脚下时 rig 的位置
+  if (app.presenting && guardianPoly) {
+    const fit = fitRect(guardianPoly, levelRect(level), { prefer: want, forward: [f.x, f.z] });
+    if (!fit) { noFit(); return false; }
+    rig.rotation.set(0, fit.yaw, 0);
+    rig.position.set(fit.x, 0, fit.z);
+    needStart = Math.hypot(fit.x - want[0], fit.z - want[1]) > CELL * 0.3 || Math.abs(fit.yaw - yaw) > 0.05;
+    if (needStart && steps === 0) setStatus('关卡放在安全边界里了：先走到绿色圆圈（小人那一格）');
+  } else {
+    rig.rotation.set(0, yaw, 0);
+    rig.position.set(want[0], 0, want[1]);
+    needStart = false;
+    if (app.presenting && steps === 0) setStatus('没读到安全边界，走动时注意四周');
+  }
   physCell = st.player;
   if (withSound) sfx.click();
+}
+// 这一关放不进安全边界：换一关能放下的，实在不行就提示边界太小
+function noFit() {
+  const fits = (lv) => !!fitRect(guardianPoly, levelRect(lv), { step: 0.15 });
+  const from = levelIndex;
+  for (let n = 1; n <= HANDMADE.length; n++) {
+    const j = (from + n) % HANDMADE.length;
+    if (fits(parse(HANDMADE[j].map, ''))) {
+      loadLevel(j);
+      setStatus(`上一关放不进你的安全边界，换成第 ${j + 1} 关`);
+      return;
+    }
+  }
+  for (let t = 0; t < 15; t++) {
+    const g = generate({ minSteps: 8, boxes: 2 });
+    if (g && fits(g)) {
+      loadLevel(Math.max(HANDMADE.length, levelIndex), { ...g, name: '随机关卡（小）' });
+      setStatus('换成一关能放进安全边界的随机关卡');
+      return;
+    }
+  }
+  state = 'noroom';
+  setStatus('安全边界太小，放不下关卡（至少约 2×2 米）');
 }
 
 // ================= 移动 =================
@@ -403,6 +463,55 @@ mk('随机关卡', 0.305, -0.335, '#3a5bd9', () => loadLevel(Math.max(levelIndex
 mk('移到脚下  B/Y', -0.155, -0.43, '#2e5a46', () => placeLevel(), 0.43);
 const envButton = mk('背景：… ▶', 0.23, -0.43, '#5a4a2e', () => envs.next(), 0.43);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
+const wristButton = mk('', -0.155, -0.525, '#2e4f6a', () => { wrist.enabled = !wrist.enabled; savePref('push-wrist', wrist.enabled ? '1' : '0'); wristButton.userData.ui.setLabel(`手腕地图：${wrist.enabled ? '开' : '关'}`); }, 0.43);
+{
+  const exitButton = makeExitButton(app, { width: 0.43, height: 0.08 });
+  exitButton.position.set(0.23, -0.525, 0);
+  panelGroup.add(exitButton);
+  uiButtons.push(exitButton);
+}
+
+// ---- 手腕地图：抬起左手像看手表，显示整个关卡；你面对的方向朝上 ----
+const wrist = createWristMap(app, {
+  enabled: loadPref('push-wrist', '1') === '1',
+  draw(ctx, w, h) {
+    roundRect(ctx, 6, 6, w - 12, h - 12, 40);
+    ctx.fillStyle = 'rgba(14,20,36,0.94)'; ctx.fill();
+    ctx.lineWidth = 8; ctx.strokeStyle = '#3b4a78'; ctx.stroke();
+    if (!level) return;
+    const inside = floorCells(level);
+    const f = app.headForward(new THREE.Vector3()).applyAxisAngle(new THREE.Vector3(0, 1, 0), -rig.rotation.y);
+    const cs = Math.min((w - 120) / level.w, (h - 120) / level.h);
+    ctx.save();
+    ctx.translate(w / 2, h / 2);
+    ctx.rotate(-Math.atan2(f.x, -f.z));
+    ctx.translate(-level.w * cs / 2, -level.h * cs / 2);
+    for (let y = 0; y < level.h; y++) for (let x = 0; x < level.w; x++) {
+      const k = y * level.w + x;
+      if (level.walls.has(k)) { ctx.fillStyle = '#6d665c'; ctx.fillRect(x * cs + 2, y * cs + 2, cs - 4, cs - 4); }
+      else if (inside.has(k)) { ctx.fillStyle = '#cfc6b4'; ctx.fillRect(x * cs + 2, y * cs + 2, cs - 4, cs - 4); }
+    }
+    for (const k of level.goals) {
+      ctx.strokeStyle = '#ffd166'; ctx.lineWidth = cs * 0.1;
+      ctx.beginPath(); ctx.arc((k % level.w + 0.5) * cs, (Math.floor(k / level.w) + 0.5) * cs, cs * 0.28, 0, Math.PI * 2); ctx.stroke();
+    }
+    for (const k of st.boxes) {
+      ctx.fillStyle = level.goals.includes(k) ? '#ffd166' : '#a8723e';
+      ctx.fillRect((k % level.w + 0.14) * cs, (Math.floor(k / level.w) + 0.14) * cs, cs * 0.72, cs * 0.72);
+    }
+    // 小人（游戏里你在哪一格）
+    ctx.fillStyle = '#5cffb0';
+    ctx.beginPath(); ctx.arc((st.player % level.w + 0.5) * cs, (Math.floor(st.player / level.w) + 0.5) * cs, cs * 0.26, 0, Math.PI * 2); ctx.fill();
+    // 你本人（真实位置）
+    const me = rig.worldToLocal(app.footPosition(new THREE.Vector3()));
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.arc((me.x / CELL + 0.5) * cs, (me.z / CELL + 0.5) * cs, cs * 0.18, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = '#c9d3ea'; ctx.font = `600 44px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(needStart ? '先走到绿点' : `${st.boxes.filter((b) => level.goals.includes(b)).length}/${level.goals.length} 到位`, w / 2, h - 30);
+  },
+});
+wristButton.userData.ui.setLabel(`手腕地图：${wrist.enabled ? '开' : '关'}`);
 
 function positionPanel() {
   panelGroup.position.set(((level.w - 1) / 2) * CELL, 1.45, -CELL * 0.9);
@@ -458,7 +567,8 @@ function onFrame(dt) {
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeLevel(false); }
     updateBody();
-    feet.update(app.headPosition(tmpHead), app.headForward(new THREE.Vector3()), 0.022, dt);
+    feet.update(app.footPosition(tmpHead), app.headForward(new THREE.Vector3()), 0.022, dt);
+    wrist.update(dt);
     updatePointers();
     app.pollButtons((c, bi) => {
       if (bi === 4) undo();
@@ -495,7 +605,7 @@ function onFrame(dt) {
   // 你本人站在小人那一格时，小人变透明（不挡你看脚下）
   let alpha = 1;
   if (app.presenting) {
-    const local = rig.worldToLocal(app.headPosition(tmpHead).clone());
+    const local = rig.worldToLocal(app.footPosition(tmpHead).clone());
     const d = Math.hypot(local.x - ap.x, local.z - ap.z);
     alpha = THREE.MathUtils.clamp((d - 0.15) / 0.3, 0.15, 1);
   }
@@ -516,13 +626,19 @@ function onFrame(dt) {
 // 小人会沿着直线一步一步追上你（每一步都按规则走，碰到箱子就推）。
 let blockedTarget = -1;
 function updateBody() {
-  const local = rig.worldToLocal(app.headPosition(tmpHead).clone());
+  const local = rig.worldToLocal(app.footPosition(tmpHead).clone());
   const fx = local.x / CELL, fy = local.z / CELL;
   const cx = Math.round(fx), cy = Math.round(fy);
   if (Math.hypot(fx - cx, fy - cy) > ENTER) return; // 在两格中间，先不算
   if (cx < 0 || cy < 0 || cx >= level.w || cy >= level.h) return;
   const cell = cy * level.w + cx;
   physCell = cell;
+  if (needStart) {
+    if (cell !== st.player) return;
+    needStart = false;
+    setStatus('好，开始推箱子吧');
+    sfx.click();
+  }
   if (cell === st.player) { blockedTarget = -1; return; }
   if (cell === blockedTarget) return; // 刚才这里推不动，等你换个地方再试
   for (let n = 0; n < MAX_CATCHUP && st.player !== cell && state === 'playing'; n++) {
@@ -655,6 +771,7 @@ loadLevel(levelIndex);
 // 调试用
 window.pushgame = {
   get state() { return state; }, get level() { return level; }, get st() { return st; }, get steps() { return steps; }, get levelIndex() { return levelIndex; },
-  move, undo, restart, loadLevel, showHint, solve, updateBody, placeLevel, camera, controls, envs, rig,
+  move, undo, restart, loadLevel, showHint, solve, updateBody, placeLevel, camera, controls, envs, rig, levelRect, wrist,
+  setGuardian(pts) { guardianPoly = pts; }, get needStart() { return needStart; },
   HANDMADE_COUNT: HANDMADE.length,
 };

@@ -175,6 +175,15 @@ export function createXRApp({ onFrame } = {}) {
   function headPosition(target = new THREE.Vector3()) {
     return camera.getWorldPosition(target);
   }
+  // 估计脚站的位置：眼睛往后 10 厘米、往下 12 厘米大约是脖子，脖子正下方就是脚。
+  // 低头时眼睛会往前探，用脖子估计比直接用眼睛准得多（试玩反馈：认格子要快、要准）。
+  const footOffset = new THREE.Vector3();
+  function footPosition(target = new THREE.Vector3()) {
+    camera.updateMatrixWorld();
+    target.copy(footOffset.set(0, -0.12, 0.1)).applyMatrix4(camera.matrixWorld);
+    target.y = 0;
+    return target;
+  }
   function headForward(target = new THREE.Vector3()) {
     camera.getWorldDirection(target);
     target.y = 0;
@@ -200,7 +209,7 @@ export function createXRApp({ onFrame } = {}) {
     renderer, scene, camera, controllers,
     on, pulse, pulseAll, pollButtons, pointAt, getRay,
     get bounds() { return bounds; },
-    supports, enter, headPosition, headForward,
+    supports, enter, headPosition, headForward, footPosition,
     get mode() { return mode; },
     get referenceType() { return referenceType; },
     get presenting() { return renderer.xr.isPresenting; },

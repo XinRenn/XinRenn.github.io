@@ -5,7 +5,8 @@ import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
-import { iconMaterial } from '../link/icons.js';
+import { themeMaterial, TILE_THEMES, THEME_FOR_ENV } from './themes.js';
+import { makeExitButton } from '../../shared/exit.js';
 
 // ================= 可调参数 =================
 // n：塔底是 n×n 根柱子；total：方块总数；maxH：最高几层
@@ -17,8 +18,8 @@ const PRESETS = {
 const STEP = 0.09;        // 方块间距（米）
 const TILE = 0.084;       // 方块边长
 const LAYER_H = 0.09;     // 每层高度
-const PEDESTAL_H = 0.8;   // 塔底座高度
-const TOWER_AHEAD = 1.0;  // 塔离你多远
+const HIP_BELOW_EYE = 0.72; // 底座台面在眼睛下面多少（大约胯部，试玩反馈）
+const TOWER_AHEAD = 0.62; // 塔中心离你多远（台面前沿离你不到 20 厘米，伸手就够得着）
 const TRAY_SLOTS = 7;
 const TRAY_GAP = 0.075;   // 槽位间距
 const TRAY_SCALE = 0.75;  // 方块进槽后缩小
@@ -33,6 +34,7 @@ const envs = createEnvManager(scene, {
   onChange: (def) => {
     envButton?.userData.ui.setLabel(`背景：${def.label} ▶`);
     if (envSelect) envSelect.value = def.key;
+    refreshTheme();
   },
 });
 envs.set(savedEnvKey());
@@ -53,20 +55,44 @@ const rig = new THREE.Group();
 rig.position.set(0, 0, -TOWER_AHEAD);
 scene.add(rig);
 const tower = new THREE.Group();
-tower.position.y = PEDESTAL_H;
 rig.add(tower);
+let pedH = 0.8;          // 底座台面高度（进入 VR 时按你的身高调到胯部）
+const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.46, 1, 40), new THREE.MeshStandardMaterial({ color: '#8b8478', roughness: 0.85 }));
+const pedTop = new THREE.Mesh(new THREE.CylinderGeometry(0.43, 0.43, 0.03, 40), new THREE.MeshStandardMaterial({ color: '#a39b8d', roughness: 0.7 }));
 {
-  const stone = new THREE.MeshStandardMaterial({ color: '#8b8478', roughness: 0.85 });
-  const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.46, PEDESTAL_H, 40), stone);
-  ped.position.y = PEDESTAL_H / 2;
-  const top = new THREE.Mesh(new THREE.CylinderGeometry(0.43, 0.43, 0.03, 40), new THREE.MeshStandardMaterial({ color: '#a39b8d', roughness: 0.7 }));
-  top.position.y = PEDESTAL_H - 0.015;
-  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.52, 0.06, 40), stone);
+  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.52, 0.06, 40), ped.material);
   foot.position.y = 0.03;
-  rig.add(ped, top, foot);
+  rig.add(ped, pedTop, foot);
 }
-// “移出 3 块”时放方块的小台子（底座前沿）
+function setPedestal(h) {
+  pedH = THREE.MathUtils.clamp(h, 0.45, 1.3);
+  ped.scale.y = pedH;
+  ped.position.y = pedH / 2;
+  pedTop.position.y = pedH - 0.015;
+  tower.position.y = pedH;
+}
+setPedestal(0.8);
+// “移出 3 块”时放方块的地方：台面前沿（tower 坐标）
 const SHELF = [-0.1, 0, 0.1].map((x) => new THREE.Vector3(x, TILE / 2 + 0.002, 0.355));
+
+// ---- 图案主题：跟随背景，或者自己选 ----
+const THEME_KEYS = ['auto', ...Object.keys(TILE_THEMES)];
+let themePref = THEME_KEYS.includes(loadPref('tower-theme', 'auto')) ? loadPref('tower-theme', 'auto') : 'auto';
+function curTheme() { return themePref === 'auto' ? THEME_FOR_ENV[envs.key] || 'cats' : themePref; }
+function matFor(i) { return themeMaterial(curTheme(), i); }
+function refreshTheme() {
+  dimCache.clear();
+  for (const t of tiles) if (t.where !== 'gone') t.mesh.material = matFor(t.icon);
+  refreshFree?.();
+  themeButton?.userData.ui.setLabel(`图案：${themePref === 'auto' ? '跟随背景（' + TILE_THEMES[curTheme()] + '）' : TILE_THEMES[themePref]}`);
+}
+function nextTheme() {
+  themePref = THEME_KEYS[(THEME_KEYS.indexOf(themePref) + 1) % THEME_KEYS.length];
+  savePref('tower-theme', themePref);
+  if (themeSelect) themeSelect.value = themePref;
+  refreshTheme();
+  sfx.click();
+}
 
 // 手柄尖端的小光球
 const tips = app.controllers.map(() => {
@@ -82,14 +108,24 @@ const hoverBox = new THREE.LineSegments(
 hoverBox.visible = false;
 scene.add(hoverBox);
 
-// ================= 收集槽（跟着你，飘在手边）=================
+// ================= 收集槽（固定在一个地方；可以像拿方块一样抓住它挪走）=================
 const tray = new THREE.Group();
 scene.add(tray);
+const TRAY_W = TRAY_GAP * TRAY_SLOTS + 0.03;
 {
-  const width = TRAY_GAP * TRAY_SLOTS + 0.03;
-  const bar = new THREE.Mesh(new THREE.BoxGeometry(width, 0.012, 0.09), new THREE.MeshStandardMaterial({ color: '#2a2f45', roughness: 0.4, metalness: 0.3 }));
+  const width = TRAY_W;
+  const dark = new THREE.MeshStandardMaterial({ color: '#2a2f45', roughness: 0.4, metalness: 0.3 });
+  const bar = new THREE.Mesh(new THREE.BoxGeometry(width, 0.012, 0.09), dark);
   bar.position.y = -0.04;
   tray.add(bar);
+  // 两头的小把手：抓这里就能挪
+  const handleMat = new THREE.MeshStandardMaterial({ color: '#f5b941', roughness: 0.4 });
+  for (const s of [-1, 1]) {
+    const h = new THREE.Mesh(new THREE.TorusGeometry(0.025, 0.007, 8, 20, Math.PI), handleMat);
+    h.position.set(s * (width / 2 + 0.006), -0.04, 0);
+    h.rotation.set(0, s * Math.PI / 2, Math.PI / 2);
+    tray.add(h);
+  }
   for (let s = 0; s < TRAY_SLOTS; s++) {
     const slot = new THREE.Mesh(new THREE.PlaneGeometry(0.066, 0.066), new THREE.MeshBasicMaterial({ color: '#4a5378', transparent: true, opacity: 0.6 }));
     slot.rotation.x = -Math.PI / 2;
@@ -124,7 +160,7 @@ const tileGeo = new THREE.BoxGeometry(TILE, TILE, TILE);
 const dimCache = new Map();
 function dimMaterial(i) {
   if (!dimCache.has(i)) {
-    const m = iconMaterial(i).clone();
+    const m = matFor(i).clone();
     m.color.set('#55586a');
     dimCache.set(i, m);
   }
@@ -208,7 +244,7 @@ function newGame(k = presetKey) {
   used = { undo: false, shuffle: false, out: false };
   effects.length = 0;
   for (const p of generate(cfg)) {
-    const mesh = new THREE.Mesh(tileGeo, iconMaterial(p.icon));
+    const mesh = new THREE.Mesh(tileGeo, matFor(p.icon));
     const t = { ...p, mesh, where: 'tower', target: null, free: false };
     mesh.userData.tile = t;
     mesh.position.copy(towerLocal(t));
@@ -223,6 +259,7 @@ function newGame(k = presetKey) {
   setStatus('拿亮着的方块，三个相同就消掉');
   sfx.click();
 }
+let themeSelect = null;
 
 function towerTiles() { return tiles.filter((t) => t.where === 'tower'); }
 function refreshFree() {
@@ -230,7 +267,7 @@ function refreshFree() {
   const idx = makeIndex(list);
   for (const t of list) {
     t.free = isFree(t, list, idx);
-    t.mesh.material = t.free ? iconMaterial(t.icon) : dimMaterial(t.icon);
+    t.mesh.material = t.free ? matFor(t.icon) : dimMaterial(t.icon);
   }
 }
 
@@ -251,7 +288,7 @@ function take(t, force = false) {
   let at = trayList.length;
   for (let n = trayList.length - 1; n >= 0; n--) if (trayList[n].icon === t.icon) { at = n + 1; break; }
   trayList.splice(at, 0, t);
-  t.mesh.material = iconMaterial(t.icon);
+  t.mesh.material = matFor(t.icon);
   tray.attach(t.mesh);
   history.push({ tile: t, from });
   sfx.flag();
@@ -326,7 +363,7 @@ function undo() {
   if (h.from.where === 'shelf') {
     t.where = 'shelf';
     shelfList[h.from.slot] = t;
-    rig.attach(t.mesh);
+    tower.attach(t.mesh);
     t.target = SHELF[h.from.slot].clone();
   } else {
     t.where = 'tower';
@@ -358,7 +395,7 @@ function moveOut() {
   three.forEach((t, n) => {
     t.where = 'shelf';
     shelfList[n] = t;
-    rig.attach(t.mesh);
+    tower.attach(t.mesh);
     t.target = SHELF[n].clone();
     history = history.filter((h) => h.tile !== t);
   });
@@ -441,6 +478,13 @@ mk('重新开始 A/X', -0.155, -0.35, '#3a5bd9', () => newGame(), 0.3);
 mk('移到面前 B/Y', 0.155, -0.35, '#3a5bd9', () => placeInFront(), 0.3);
 const envButton = mk('背景：… ▶', 0, -0.425, '#5a4a2e', () => envs.next(), 0.61);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
+const themeButton = mk('图案', -0.105, -0.5, '#7a3f6e', nextTheme, 0.4);
+{
+  const exitButton = makeExitButton(app, { width: 0.19, height: 0.065 });
+  exitButton.position.set(0.205, -0.5, 0);
+  panelGroup.add(exitButton);
+  uiButtons.push(exitButton);
+}
 
 function refreshButtons() {
   for (const [k, b] of Object.entries(diffButtons)) b.userData.ui.setActive(k === presetKey);
@@ -488,11 +532,18 @@ function drawPanel() {
 function setStatus(t) { statusText = t; drawPanel(); }
 
 let placeAfter = -1;
+// 塔放在你面前（台面在胯部高度），收集槽放在你左前方、台面高度，然后就固定不动了
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
   const f = app.headForward(new THREE.Vector3());
+  if (!app.presenting) { head.set(0, 1.6, 0); f.set(0, 0, -1); }
+  setPedestal(head.y - HIP_BELOW_EYE);
   rig.position.set(head.x + f.x * TOWER_AHEAD, 0, head.z + f.z * TOWER_AHEAD);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
+  const left = new THREE.Vector3(f.z, 0, -f.x);
+  tray.position.copy(head).addScaledVector(f, 0.22).addScaledVector(left, 0.52);
+  tray.position.y = pedH + 0.14;
+  tray.rotation.set(0, Math.atan2(-f.x, -f.z) + 0.7, 0);
   sfx.click();
 }
 
@@ -514,16 +565,7 @@ function onFrame(dt) {
   app.headPosition(headP);
   app.headForward(headF);
 
-  // 收集槽：挂在你左手边、腰的高度（像个腰包），不挡你看塔；转身时它也跟着转过来
-  const left = new THREE.Vector3(headF.z, 0, -headF.x);
-  const want = headP.clone().addScaledVector(headF, 0.24).addScaledVector(left, app.presenting ? 0.36 : 0.3);
-  want.y = headP.y - (app.presenting ? 0.62 : 0.42);
-  const yaw = Math.atan2(-headF.x, -headF.z) + 0.55; // 稍微侧过来朝着你
-  if (!trayInit) { tray.position.copy(want); tray.rotation.y = yaw; trayInit = true; }
-  tray.position.lerp(want, Math.min(1, dt * 4));
-  let dy = yaw - tray.rotation.y;
-  dy = Math.atan2(Math.sin(dy), Math.cos(dy));
-  tray.rotation.y += dy * Math.min(1, dt * 4);
+  updateTwoHand();
 
   // 面板：永远在塔的旁边（从你这边看是塔的右侧），不会挡在你和塔之间；并且转向你
   const tc = rig.localToWorld(new THREE.Vector3(0, 0, 0));
@@ -532,7 +574,7 @@ function onFrame(dt) {
     toTower.normalize();
     const side = new THREE.Vector3(-toTower.z, 0, toTower.x); // 塔的右手边
     const pwWant = tc.clone().addScaledVector(side, 0.78).addScaledVector(toTower, 0.05);
-    pwWant.y = 1.35;
+    pwWant.y = pedH + 0.55;
     const localWant = rig.worldToLocal(pwWant);
     panelGroup.position.lerp(localWant, Math.min(1, dt * 3));
   }
@@ -540,7 +582,9 @@ function onFrame(dt) {
   panelGroup.rotation.y = Math.atan2(headP.x - pw.x, headP.z - pw.z) - rig.rotation.y;
   // 拿着方块靠近槽时，槽亮起来
   const holding = app.controllers.find((c) => c.held && nearTray(c.held));
-  trayGlow.material.opacity = holding ? 0.55 + 0.25 * Math.sin(performance.now() / 90) : 0;
+  const trayHover = app.controllers.some((c) => !c.held && c.nearTray);
+  trayGlow.material.color.set(trayHover || trayGrabbed() ? '#f5b941' : '#5cffb0');
+  trayGlow.material.opacity = holding ? 0.55 + 0.25 * Math.sin(performance.now() / 90) : trayHover || trayGrabbed() ? 0.45 : 0;
 
   // 方块飞向目标位置
   for (const t of tiles) {
@@ -598,7 +642,10 @@ function updateControllers() {
       if (d < TILE / 2 + GRAB_PAD && d < nearD) { nearD = d; near = t; }
     }
     c.near = near;
-    tip.material.color.set(near ? (canTake(near) ? '#5cffb0' : '#ff6b6b') : '#ffffff');
+    // 尖端在槽（或两头把手）旁边：可以抓住槽挪走
+    const tl = tray.worldToLocal(tip.position.clone());
+    c.nearTray = !near && Math.abs(tl.x) < TRAY_W / 2 + 0.05 && Math.abs(tl.y + 0.04) < 0.06 && Math.abs(tl.z) < 0.08;
+    tip.material.color.set(near ? (canTake(near) ? '#5cffb0' : '#ff6b6b') : c.nearTray ? '#f5b941' : '#ffffff');
     const hit = app.pointAt(c, targets, 4);
     c.hover = hit ? hit.object : null;
     if (c.hover) hovered.add(c.hover);
@@ -614,26 +661,79 @@ function updateControllers() {
   }
 }
 
-// 扳机或握把：手柄尖端碰着方块 = 用手捏起来；射线指着远处的方块 = 直接收进槽
-function press(c) {
+// 扳机或握把：手柄尖端碰着方块 = 用手捏起来；碰着槽 = 抓住槽挪；
+// 扳机 + 射线指着远处的方块 = 直接收进槽；两只手同时按住握把 = 搬动整座塔
+function press(c, kind) {
   initAudio();
-  if (c.held) return;
-  if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
+  if (c.held || c.heldTray) return;
+  if (kind === 'squeeze') {
+    c.squeezing = true;
+    const other = app.controllers.find((o) => o !== c);
+    if (other?.squeezing && !other.held && !other.heldTray) { startTwoHand(); return; }
+  }
+  if (kind === 'select' && c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
   if (c.near) { grab(c, c.near); return; }
-  const t = c.hover?.userData.tile;
+  if (c.nearTray) { grabTray(c); return; }
+  const t = kind === 'select' ? c.hover?.userData.tile : null;
   if (t) take(t);
 }
-app.on('select', press);
-app.on('squeeze', press);
+app.on('select', (c) => press(c, 'select'));
+app.on('squeeze', (c) => press(c, 'squeeze'));
 app.on('selectend', (c) => release(c));
-app.on('squeezeend', (c) => release(c));
+app.on('squeezeend', (c) => { c.squeezing = false; if (twoHand) endTwoHand(); release(c); });
+
+// ---- 抓住收集槽挪位置 ----
+function trayGrabbed() { return app.controllers.some((c) => c.heldTray); }
+function grabTray(c) {
+  c.heldTray = true;
+  c.ray.attach(tray);
+  sfx.click();
+  app.pulse(c, 0.5, 40);
+  setStatus('拿着槽：放到你觉得顺手的地方，松手就固定');
+}
+function releaseTray(c) {
+  c.heldTray = false;
+  scene.attach(tray);
+  // 松手后摆平（只保留水平方向的转角）
+  const e = new THREE.Euler().setFromQuaternion(tray.quaternion, 'YXZ');
+  tray.rotation.set(0, e.y, 0);
+  sfx.unflag();
+  setStatus('槽固定在这里了');
+}
+
+// ---- 两只手捏住握把：搬动、转动整座塔（上下移动 = 调台面高度）----
+let twoHand = null;
+const handPos = (c) => c.grip.getWorldPosition(new THREE.Vector3());
+function startTwoHand() {
+  const [a, b] = app.controllers.map(handPos);
+  twoHand = { mid0: a.clone().add(b).multiplyScalar(0.5), ang0: Math.atan2(b.x - a.x, b.z - a.z), pos0: rig.position.clone(), yaw0: rig.rotation.y, ped0: pedH };
+  app.pulseAll(0.5, 60);
+  sfx.click();
+  setStatus('两手捏住了：移动、转动塔，上下移动调高度；松开就停');
+}
+function updateTwoHand() {
+  if (!twoHand) return;
+  const [a, b] = app.controllers.map(handPos);
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  let da = Math.atan2(b.x - a.x, b.z - a.z) - twoHand.ang0;
+  da = Math.atan2(Math.sin(da), Math.cos(da));
+  const off = twoHand.pos0.clone().sub(twoHand.mid0).setY(0).applyAxisAngle(new THREE.Vector3(0, 1, 0), da);
+  rig.position.set(mid.x + off.x, 0, mid.z + off.z);
+  rig.rotation.y = twoHand.yaw0 + da;
+  setPedestal(twoHand.ped0 + (mid.y - twoHand.mid0.y));
+}
+function endTwoHand() {
+  twoHand = null;
+  sfx.unflag();
+  setStatus('塔放好了');
+}
 
 function grab(c, t) {
   if (!canTake(t)) { take(t); return; } // 拿不了：给出提示
   t.origin = t.where === 'shelf' ? { where: 'shelf', slot: shelfList.indexOf(t) } : { where: 'tower' };
   if (t.where === 'shelf') shelfList[t.origin.slot] = null;
   t.where = 'hand';
-  t.mesh.material = iconMaterial(t.icon);
+  t.mesh.material = matFor(t.icon);
   c.ray.attach(t.mesh);
   t.target = new THREE.Vector3(0, 0, -TIP - 0.02);
   c.held = t;
@@ -647,6 +747,7 @@ function nearTray(t) {
   return Math.abs(p.x) < (TRAY_GAP * TRAY_SLOTS) / 2 + 0.1 && Math.abs(p.y) < 0.18 && Math.abs(p.z) < 0.18;
 }
 function release(c) {
+  if (c.heldTray) { releaseTray(c); return; }
   const t = c.held;
   if (!t) return;
   c.held = null;
@@ -659,7 +760,7 @@ function release(c) {
   if (t.origin.where === 'shelf') {
     t.where = 'shelf';
     shelfList[t.origin.slot] = t;
-    rig.attach(t.mesh);
+    tower.attach(t.mesh);
     t.target = SHELF[t.origin.slot].clone();
   } else {
     t.where = 'tower';
@@ -673,9 +774,9 @@ function release(c) {
 }
 
 // ================= 电脑上预览 =================
-camera.position.set(0.5, 1.75, 0.35);
+camera.position.set(0.35, 1.65, 0.45);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.0, -1.0);
+controls.target.set(0, 0.95, -0.62);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
@@ -711,6 +812,12 @@ envSelect.value = savedEnvKey();
 envSelect.addEventListener('change', () => envs.set(envSelect.value));
 diffSelect.value = presetKey;
 diffSelect.addEventListener('change', () => newGame(diffSelect.value));
+themeSelect = document.getElementById('theme-select');
+if (themeSelect) {
+  for (const k of THEME_KEYS) themeSelect.add(new Option(k === 'auto' ? '跟随背景' : TILE_THEMES[k], k));
+  themeSelect.value = themePref;
+  themeSelect.addEventListener('change', () => { themePref = themeSelect.value; savePref('tower-theme', themePref); refreshTheme(); });
+}
 
 (async () => {
   const [vr, ar] = await Promise.all([app.supports('immersive-vr'), app.supports('immersive-ar')]);
@@ -731,11 +838,13 @@ btnDesktop.addEventListener('click', () => {
   hint.style.display = 'block';
 });
 
+placeInFront();
 newGame(presetKey);
+refreshTheme();
 
 // 调试用
 window.towergame = {
   get state() { return state; }, get tiles() { return tiles; }, get tray() { return trayList; }, get used() { return used; },
-  take, undo, shuffleTower, moveOut, newGame, generate, isFree, makeIndex, camera, controls, envs, rig,
+  take, undo, shuffleTower, moveOut, newGame, generate, isFree, makeIndex, camera, controls, envs, rig, trayGroup: tray, nextTheme, setPedestal, curTheme,
   freeTiles() { return tiles.filter((t) => (t.where === 'tower' && t.free) || t.where === 'shelf'); },
 };

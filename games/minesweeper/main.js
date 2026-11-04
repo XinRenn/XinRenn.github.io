@@ -7,6 +7,9 @@ import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import * as G from '../../shared/geometry2d.js';
 import { createFeet } from '../../shared/feet.js';
+import { makeExitButton } from '../../shared/exit.js';
+import { createWristMap } from '../../shared/wrist.js';
+import { fitRect } from '../../shared/room.js';
 
 // ================= 可调参数 =================
 // size：石板之间的平均间距（米）；density：多少比例的石板下面有雷
@@ -18,9 +21,11 @@ const PRESETS = {
 const LAYOUTS = {
   guardian: '安全边界',
   drawn: '自己画',
-  default: '面前 2×2',
+  default: '小场地 2×2',
 };
-const DWELL = 1.5;          // 站在一格上多少秒才翻开（试玩反馈：0.7 秒太快）
+const DWELL = 1.0;          // 站在一格上多少秒才翻开（第一轮：0.7 秒太快；第二轮：1.5 秒又太慢）
+const ROOM_WAIT = 5;        // 进入 VR 后最多等几秒读安全边界
+const MIN_ROOM = 1.5;       // 安全边界（往里缩之后）至少要多少平方米才能玩
 const GUARDIAN_INSET = 0.3; // 用安全边界时往里缩多少米，离墙远一点
 const ARM_DISTANCE = 0.3;   // 开局后要先走动多远才开始计算踩格子（防止一开始脚下那格被直接翻开）
 const GAP = 0.025;          // 石板之间的缝
@@ -53,21 +58,47 @@ app.on('modechange', (mode) => {
   overlay.classList.toggle('hidden', mode !== 'desktop' || desktopPreview);
   backLink.style.display = mode === 'desktop' ? '' : 'none';
   if (mode !== 'desktop') {
-    guardianPoly = null; // 每次进入都重新读取安全边界
-    if (layoutSource === 'guardian') useLayout('default');
-    placeAfter = 0.4; // 进入后稍等一下再把场地放到面前
+    // 每次进入都重新读取安全边界；读到之前场地先藏起来（雷区一定要在安全边界里面）
+    guardianPoly = null;
+    roomState = 'waiting';
+    roomWait = ROOM_WAIT;
+    placeAfter = 0.3;
     refreshLayoutButtons();
+  } else {
+    roomState = 'ok';
+    hideBoard(false);
   }
 });
 
 // 拿到安全边界后，如果还没开始玩，就自动用它铺满场地
 app.on('bounds', (pts) => {
   const poly = G.safeInset(pts, GUARDIAN_INSET);
-  if (G.area(poly) < 1) return; // 太小（比如原地模式），不用
+  if (G.area(poly) < MIN_ROOM) { roomState = 'small'; roomArea = G.area(G.ensureCCW(pts)); showRoomProblem(); return; }
   guardianPoly = poly;
   refreshLayoutButtons();
-  if (state === 'ready' && layoutSource === 'default') useLayout('guardian');
+  if (roomState !== 'ok') {
+    roomState = 'ok';
+    hideBoard(false);
+    useLayout('guardian');
+  }
 });
+
+// ---- 没有安全边界 / 太小：不让开始 ----
+let roomState = 'ok';   // ok | waiting | none | small
+let roomWait = 0, roomArea = 0;
+function hideBoard(v) {
+  boardContent.children.forEach((o) => { if (o !== panelGroup) o.visible = !v; });
+}
+function showRoomProblem() {
+  state = 'noroom';
+  hideBoard(true);
+  positionPanelForDrawing();
+  refreshButtons();
+  if (roomState === 'waiting') setStatus('正在读取你的安全边界…');
+  else if (roomState === 'small') setStatus(`安全边界太小（约 ${roomArea.toFixed(1)} 平方米），至少要 2×2 米`);
+  else setStatus('没有找到房间规模的安全边界，请先设置一个');
+  drawPanel();
+}
 
 const youMarker = new THREE.Mesh(
   new THREE.RingGeometry(0.11, 0.14, 40),
@@ -333,6 +364,15 @@ function buildPanel() {
   envButton.position.set(0.3, -0.68, 0);
   panelGroup.add(shapeButton, envButton);
   uiButtons.push(shapeButton, envButton);
+  wristButton = makeButton('', { width: 0.34, height: 0.1, color: '#2e4f6a', onClick: () => { wrist.enabled = !wrist.enabled; savePref('minewalk-wrist', wrist.enabled ? '1' : '0'); refreshToggles(); } });
+  wristButton.position.set(-0.39, -0.8, 0);
+  floatButton = makeButton('', { width: 0.34, height: 0.1, color: '#2e4f6a', onClick: () => setFloatNums(!floatNums) });
+  floatButton.position.set(0, -0.8, 0);
+  const exitButton = makeExitButton(app, { width: 0.34, height: 0.1 });
+  exitButton.position.set(0.39, -0.8, 0);
+  panelGroup.add(wristButton, floatButton, exitButton);
+  uiButtons.push(wristButton, floatButton, exitButton);
+  refreshToggles();
   refreshButtons();
   drawPanel();
 }
@@ -357,6 +397,18 @@ function positionPanel() {
   panelGroup.rotation.set(0, Math.atan2(-dir[0], -dir[1]), 0);
 }
 
+let wristButton = null, floatButton = null;
+function refreshToggles() {
+  wristButton?.userData.ui.setLabel(`手腕地图：${wrist.enabled ? '开' : '关'}`);
+  floatButton?.userData.ui.setLabel(`半空数字：${floatNums ? '开' : '关'}`);
+}
+function setFloatNums(v) {
+  floatNums = v;
+  savePref('minewalk-float', v ? '1' : '0');
+  for (const c of cells) for (const e of c.extras) if (e.userData.float) e.visible = v;
+  refreshToggles();
+}
+
 function refreshButtons() {
   for (const [k, b] of Object.entries(difficultyButtons)) b.userData.ui.setActive(k === presetKey);
   refreshLayoutButtons();
@@ -375,7 +427,7 @@ function refreshButtons() {
 function refreshLayoutButtons() {
   for (const [k, b] of Object.entries(layoutButtons)) {
     b.userData.ui.setActive(state === 'drawing' ? k === 'drawn' : k === layoutSource);
-    b.userData.ui.setDisabled(k === 'guardian' && !guardianPoly);
+    b.userData.ui.setDisabled((k === 'guardian' || app.presenting) && !guardianPoly);
   }
 }
 
@@ -461,8 +513,62 @@ function showRevealed(c) {
     s.position.set(c.cx, 0.18, c.cz);
     boardContent.add(s);
     c.extras.push(s);
+    // 同一个数字再飘一个在胸口高度：平视就能看到，不用一直低头
+    const f = new THREE.Sprite(new THREE.SpriteMaterial({ map: numberTexture(c.adj), depthWrite: false, transparent: true, opacity: 0.9 }));
+    f.scale.setScalar(0.13);
+    f.position.set(c.cx, FLOAT_Y, c.cz);
+    f.userData.float = true;
+    f.visible = floatNums;
+    boardContent.add(f);
+    c.extras.push(f);
   }
 }
+const FLOAT_Y = 1.05;
+let floatNums = loadPref('minewalk-float', '1') === '1';
+
+// ---- 手腕地图：抬起左手看 ----
+const wrist = createWristMap(app, {
+  enabled: loadPref('minewalk-wrist', '1') === '1',
+  draw(ctx, w, h) {
+    roundRect(ctx, 6, 6, w - 12, h - 12, 40);
+    ctx.fillStyle = 'rgba(14,20,36,0.94)'; ctx.fill();
+    ctx.lineWidth = 8; ctx.strokeStyle = '#3b4a78'; ctx.stroke();
+    if (!cells.length || state === 'noroom') {
+      ctx.fillStyle = '#c9d3ea'; ctx.font = `700 60px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('没有场地', w / 2, h / 2);
+      return;
+    }
+    // 以你为中心、你面对的方向朝上
+    const foot = board.worldToLocal(app.footPosition(new THREE.Vector3()));
+    const fl = app.headForward(new THREE.Vector3()).applyAxisAngle(new THREE.Vector3(0, 1, 0), -board.rotation.y);
+    const f = [fl.x, fl.z];
+    const r = [-f[1], f[0]];
+    const p0 = G.centroid(boundary); // 地图以场地中心为中心、你面对的方向朝上
+    let maxR = 0.5;
+    for (const q of boundary) maxR = Math.max(maxR, Math.hypot(q[0] - p0[0], q[1] - p0[1]));
+    const sc = (w / 2 - 50) / maxR;
+    const map = (q) => { const dx = q[0] - p0[0], dz = q[1] - p0[1]; return [w / 2 + (dx * r[0] + dz * r[1]) * sc, h / 2 - (dx * f[0] + dz * f[1]) * sc]; };
+    for (const c of cells) {
+      ctx.beginPath();
+      c.poly.forEach((q, i) => { const [x, y] = map(q); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.closePath();
+      ctx.fillStyle = c === standing.cell && !c.revealed ? '#2fbf7f' : c.revealed ? '#4a3f33' : state === 'lost' && c.mine ? '#ff3b30' : '#d6cdb9';
+      ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.stroke();
+      const [x, y] = map([c.cx, c.cz]);
+      const fs = Math.max(26, Math.min(70, c.inR * sc * 1.3));
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (c.revealed && c.adj) { ctx.fillStyle = NUM_COLORS[c.adj]; ctx.font = `900 ${fs}px ${FONT}`; ctx.fillText(String(c.adj), x, y + 2); }
+      if (c.flagged) { ctx.fillStyle = '#ff4d4d'; ctx.font = `900 ${fs}px ${FONT}`; ctx.fillText('⚑', x, y); }
+    }
+    // 你：一个朝上的小三角（地图跟着你转，所以箭头永远朝上）
+    let [mx, my] = map([foot.x, foot.z]);
+    mx = Math.max(40, Math.min(w - 40, mx)); my = Math.max(40, Math.min(h - 40, my));
+    ctx.fillStyle = '#5cffb0'; ctx.strokeStyle = '#0d1220'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(mx, my - 34); ctx.lineTo(mx + 24, my + 22); ctx.lineTo(mx - 24, my + 22); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+  },
+});
 
 function reveal(c) {
   if (state !== 'ready' && state !== 'playing') return;
@@ -539,6 +645,7 @@ function win() {
 
 // 每一局都会重新切一次石板，所以每局形状都不一样
 function newGame(key = presetKey) {
+  if (app.presenting && roomState !== 'ok') { presetKey = key; cfg = PRESETS[key]; showRoomProblem(); return; }
   const wasDrawing = state === 'drawing';
   presetKey = key;
   cfg = PRESETS[key];
@@ -572,11 +679,12 @@ function setTileShape(shape) {
 }
 
 function useLayout(key) {
+  if (app.presenting && roomState !== 'ok') return;
   if (key === 'drawn') { startDrawing(); return; }
   if (key === 'guardian' && !guardianPoly) return;
   layoutSource = key;
   if (key === 'default') {
-    placeBoardInFront(false);
+    if (placeBoardInFront(false) === false) return;
   } else {
     board.position.set(0, 0, 0);
     board.rotation.set(0, 0, 0);
@@ -605,8 +713,17 @@ function placeBoardInFront(withSound = true) {
   const head = app.headPosition(new THREE.Vector3());
   const dir = app.headForward(new THREE.Vector3());
   const dist = 1.35;
-  board.position.set(head.x + dir.x * dist, 0, head.z + dir.z * dist);
-  board.rotation.y = Math.atan2(-dir.x, -dir.z);
+  if (app.presenting) {
+    // VR 里：2×2 场地（连同身后的起点）必须整块落在安全边界里面
+    if (!guardianPoly) return;
+    const fit = fitRect(guardianPoly, { x0: -1.05, x1: 1.05, z0: -1.05, z1: 1.6 }, { prefer: [head.x + dir.x * dist, head.z + dir.z * dist], forward: [dir.x, dir.z] });
+    if (!fit) { useLayout('guardian'); setStatus('安全边界里放不下 2×2 小场地，已改成铺满安全边界'); return false; }
+    board.position.set(fit.x, 0, fit.z);
+    board.rotation.y = fit.yaw;
+  } else {
+    board.position.set(head.x + dir.x * dist, 0, head.z + dir.z * dist);
+    board.rotation.y = Math.atan2(-dir.x, -dir.z);
+  }
   if (withSound) sfx.click();
 }
 
@@ -675,6 +792,7 @@ function nearFirstPoint(p) {
 
 function addDrawPoint(p) {
   if (nearFirstPoint(p)) { finishDrawing(); return; }
+  if (app.presenting && guardianPoly && !G.pointInPolygon(p, guardianPoly)) { setStatus('这个点在安全边界外面，往里放一点'); sfx.warn(); return; }
   if (drawPoints.length && G.dist(p, drawPoints[drawPoints.length - 1]) < 0.1) return;
   drawPoints.push(p);
   updateDrawVisuals();
@@ -857,11 +975,16 @@ function onFrame(dt) {
   if (app.presenting) {
     if (placeAfter > 0) {
       placeAfter -= dt;
-      if (placeAfter <= 0) placeBoardInFront(false);
+      if (placeAfter <= 0 && roomState === 'waiting') showRoomProblem();
+    }
+    if (roomState === 'waiting') {
+      roomWait -= dt;
+      if (roomWait <= 0) { roomState = 'none'; showRoomProblem(); }
     }
     youMarker.visible = false;
-    updateStanding(app.headPosition(tmpHead), dt);
+    updateStanding(app.footPosition(tmpHead), dt);
     feet.update(tmpHead, app.headForward(new THREE.Vector3()), 0.045, dt);
+    wrist.update(dt);
     updatePointers();
     app.pollButtons((c, bi) => {
       if (bi === 4) primaryAction();
@@ -981,5 +1104,6 @@ window.minewalk = {
   get layout() { return layoutSource; }, get mineTotal() { return mineTotal; },
   board, newGame, reveal, toggleFlag, updateStanding, useLayout, addDrawPoint, finishDrawing,
   setGuardian(pts) { guardianPoly = G.safeInset(pts, GUARDIAN_INSET); refreshLayoutButtons(); },
+  get roomState() { return roomState; }, wrist, setFloatNums, placeBoardInFront, fitRect, G,
   camera, controls, envs, setTileShape,
 };

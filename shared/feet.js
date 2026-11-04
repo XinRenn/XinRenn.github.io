@@ -1,5 +1,5 @@
 // 卡通脚：显示在你头部正下方的地面上，朝向跟着你的头转，让你知道自己站在哪里。
-// 头显只知道头的位置，不知道脚的位置，所以脚画在“头的正下方稍微往后一点”的地方。
+// 头显只知道头的位置，不知道脚的位置，所以脚画在“脖子正下方”（见 app.footPosition）。
 import * as THREE from 'three';
 
 function shoe(color, accent) {
@@ -58,8 +58,8 @@ export function createFeet({ color = '#ff6b6b', accent = '#3a86ff' } = {}) {
 
   return {
     object: group,
-    // headWorld：头的世界坐标；forward：头朝向（水平）；floorY：地面高度
-    update(headWorld, forward, floorY = 0, dt = 0.016) {
+    // footWorld：脚的世界坐标（app.footPosition()）；forward：头朝向（水平）；floorY：地面高度
+    update(footWorld, forward, floorY = 0, dt = 0.016) {
       group.visible = true;
       fwd.copy(forward).setY(0).normalize();
       const want = Math.atan2(fwd.x, fwd.z);
@@ -67,8 +67,7 @@ export function createFeet({ color = '#ff6b6b', accent = '#3a86ff' } = {}) {
       let d = want - yaw;
       d = Math.atan2(Math.sin(d), Math.cos(d));
       yaw += d * Math.min(1, dt * 6); // 转头时脚慢慢跟着转
-      // 低头时头会往前探，脚的位置往回收一点
-      group.position.set(headWorld.x - fwd.x * 0.06, floorY + 0.002, headWorld.z - fwd.z * 0.06);
+      group.position.set(footWorld.x, floorY + 0.002, footWorld.z);
       group.rotation.y = yaw;
     },
     hide() { group.visible = false; },

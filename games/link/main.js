@@ -1,5 +1,6 @@
-// 空中连线（新版）：面前一面彩色圆点墙，用手在空中把 3 个或更多相邻的同色点连成一条线，松手就破掉；
-// 上面的点往下掉、顶上不断补新的，可以一直玩下去。连成一个圈 = 这个颜色全部消掉；一次连 6 个以上会留下一颗彩虹星（能当任何颜色用）。
+// 空中连线：面前一面彩色圆点墙，用手在空中把 3 个或更多上下左右相邻的同色点连成一条线，松手就破掉；
+// 上面的点往下掉、顶上不断补新的。连成一个圈 = 这个颜色全部消掉；一次连 6 个以上会留下一颗彩虹星。
+// 三种玩法：闯关（有步数和目标，还有冰块、石头）、无尽、60 秒挑战。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
@@ -9,17 +10,23 @@ import { createXRApp } from '../../shared/xr-app.js';
 import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.js';
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
+import { makeExitButton } from '../../shared/exit.js';
+import { LEVELS, levelSpec } from './levels.js';
 
 // ================= 可调参数 =================
-const COLS = 7, ROWS = 8;
-const GAP = 0.085;          // 圆点间距（米）
-const DOT_R = 0.028;        // 圆点半径
-const TOUCH = 0.034;        // 手柄尖端离圆点中心多近算碰到
+const COLS = 8, ROWS = 9;
+const GAP = 0.11;           // 圆点间距（米）：整块大约 0.9 × 1 米
+const DOT_R = 0.036;        // 圆点半径
+const TOUCH = 0.046;        // 手柄尖端离圆点中心多近算碰到
+const ARM = 0.6;            // 面板离你多远（一臂）
+const CHEST = 0.3;          // 胸口比眼睛低多少：面板最底边放在这里
 const TIP = 0.045;          // 尖端在手柄前方多远
 const COMBO_WINDOW = 3;     // 几秒内接着消算连击
 const TIMED_SECONDS = 60;
 const COLORS = ['#ff4d6d', '#ffd166', '#06d6a0', '#4dabf7', '#b197fc', '#ff922b'];
 const STAR = -1;            // 彩虹星：能当任何颜色
+const STONE = -2;           // 石头（闯关）：不能连，旁边的点消掉时它就碎了
+const BOARD_W = COLS * GAP + 0.05, BOARD_H = ROWS * GAP + 0.05;
 
 // ================= 场景 =================
 const app = createXRApp({ onFrame });
@@ -44,16 +51,15 @@ app.on('modechange', (mode) => {
 function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_) { return d; } }
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
-const rig = new THREE.Group();
-rig.position.set(0, 1.25, -0.45);
+const rig = new THREE.Group();   // 原点 = 圆点墙中心
+rig.position.set(0, 1.3 + BOARD_H / 2, -ARM);
 scene.add(rig);
 const board = new THREE.Group();
 rig.add(board);
 
 // 圆点墙的底板
 {
-  const w = COLS * GAP + 0.05, h = ROWS * GAP + 0.05;
-  const back = makeCanvasPlane(w, h, 600);
+  const back = makeCanvasPlane(BOARD_W, BOARD_H, 600);
   back.redraw((ctx, cw, ch) => {
     roundRect(ctx, 4, 4, cw - 8, ch - 8, 40);
     ctx.fillStyle = 'rgba(16, 22, 40, 0.72)';
@@ -89,10 +95,18 @@ const starGeo = (() => {
 })();
 const dotMats = COLORS.map((c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.25, metalness: 0.05, emissive: c, emissiveIntensity: 0.12 }));
 const starMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.2, metalness: 0.4, emissive: '#ffffff', emissiveIntensity: 0.35 });
+const stoneGeo = new THREE.DodecahedronGeometry(DOT_R * 1.15, 0);
+const stoneMat = new THREE.MeshStandardMaterial({ color: '#8b8580', roughness: 0.95, flatShading: true });
+// 冰块：盖在格子上（不跟着点往下掉），在它上面消掉一个点，冰就碎了
+const iceGeo = new THREE.BoxGeometry(GAP * 0.9, GAP * 0.9, 0.012);
+const iceMat = new THREE.MeshStandardMaterial({ color: '#bfe9ff', roughness: 0.1, metalness: 0.1, transparent: true, opacity: 0.55, emissive: '#7fd3ff', emissiveIntensity: 0.25 });
 
 let grid = [];           // grid[c][r] = dot | null
+let ice = [];            // ice[c][r] = mesh | null
 let nColors = 5;
-let mode = 'endless';    // endless | timed
+let mode = 'levels';     // levels | endless | timed
+let levelIdx = 0, lv = null;   // 闯关：当前关卡
+let movesLeft = 0, goals = {}; // goals: { 0: 剩几个红点, ..., ice: 剩几块冰, stone: 剩几块石头 }
 let state = 'playing';   // playing | over
 let score = 0, combo = 0, lastClear = -99, timeLeft = TIMED_SECONDS;
 let clock = 0;
@@ -101,7 +115,8 @@ let statusText = '';
 const effects = [];
 
 function makeDot(c, r, color, fromRow = r) {
-  const mesh = new THREE.Mesh(color === STAR ? starGeo : dotGeo, color === STAR ? starMat : dotMats[color]);
+  const mesh = color === STONE ? new THREE.Mesh(stoneGeo, stoneMat) : new THREE.Mesh(color === STAR ? starGeo : dotGeo, color === STAR ? starMat : dotMats[color]);
+  if (color === STONE) mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
   mesh.position.copy(cellPos(c, fromRow));
   board.add(mesh);
   const d = { c, r, color, mesh, vy: 0 };
@@ -112,33 +127,65 @@ const randColor = () => Math.floor(Math.random() * nColors);
 
 function newGame(m = mode, colors = nColors) {
   mode = m;
-  nColors = colors;
   savePref('dots-mode', mode);
-  savePref('dots-colors', String(nColors));
+  if (mode === 'levels') {
+    lv = levelSpec(levelIdx);
+    nColors = lv.colors;
+    movesLeft = lv.moves;
+    goals = { ...lv.goals };
+  } else {
+    nColors = colors;
+    savePref('dots-colors', String(nColors));
+    lv = null;
+  }
   for (const col of grid) for (const d of col) if (d) board.remove(d.mesh);
+  for (const col of ice) for (const m of col) if (m) board.remove(m);
   grid = Array.from({ length: COLS }, (_, c) => Array.from({ length: ROWS }, (_, r) => makeDot(c, r, randColor(), r + ROWS + 1)));
+  ice = Array.from({ length: COLS }, () => Array(ROWS).fill(null));
+  if (lv) {
+    // 冰块铺在下半部分，石头随机替换掉一些点
+    const cells = [];
+    for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) cells.push([c, r]);
+    const pick = (n, filter) => {
+      const pool = cells.filter(filter).sort(() => Math.random() - 0.5);
+      return pool.slice(0, n);
+    };
+    for (const [c, r] of pick(goals.ice || 0, ([, r]) => r < Math.ceil(ROWS * 0.6))) {
+      const m = new THREE.Mesh(iceGeo, iceMat);
+      m.position.copy(cellPos(c, r)).setZ(-0.012);
+      board.add(m);
+      ice[c][r] = m;
+    }
+    for (const [c, r] of pick(goals.stone || 0, ([, r]) => r < ROWS - 1)) {
+      board.remove(grid[c][r].mesh);
+      grid[c][r] = makeDot(c, r, STONE, r + ROWS + 1);
+    }
+  }
   ensureMove();
   state = 'playing';
   score = 0; combo = 0; lastClear = -99; timeLeft = TIMED_SECONDS;
   cancelChain();
   refreshButtons();
-  setStatus(mode === 'timed' ? '60 秒挑战：能连多少连多少！' : '把 3 个以上相邻的同色点连成一条线');
+  setStatus(mode === 'timed' ? '60 秒挑战：能连多少连多少！' : mode === 'levels' ? `第 ${levelIdx + 1} 关：${movesLeft} 步内完成目标` : '把 3 个以上相邻的同色点连成一条线');
   sfx.click();
 }
+function goalsDone() { return Object.values(goals).every((v) => v <= 0); }
+function countGoal(key, n = 1) { if (goals[key] > 0) goals[key] = Math.max(0, goals[key] - n); }
 
 // ================= 连线规则 =================
-const adjacent = (a, b) => a !== b && Math.abs(a.c - b.c) <= 1 && Math.abs(a.r - b.r) <= 1; // 上下左右和斜对角都算
+const adjacent = (a, b) => Math.abs(a.c - b.c) + Math.abs(a.r - b.r) === 1; // 只算上下左右（试玩反馈：去掉斜着连）
 function chainColor(cells) {
   const d = cells.find((x) => x.color !== STAR);
   return d ? d.color : STAR;
 }
 function canJoin(cells, d) {
+  if (d.color === STONE || cells.some((x) => x.color === STONE)) return false;
   const col = chainColor(cells);
   return d.color === STAR || col === STAR || d.color === col;
 }
 
 function startChain(d, by) {
-  if (state !== 'playing' || chain) return;
+  if (state !== 'playing' || chain || !d || d.color === STONE) return;
   chain = { cells: [d], by, closed: false, line: makeLine(colorOf(d.color)) };
   bump(d);
   sfx.tick();
@@ -160,7 +207,7 @@ function touchDot(d) {
   if (!adjacent(last, d) || !canJoin(cells, d)) return;
   if (cells.includes(d)) {
     // 连回链上已有的点 = 圈
-    if (cells.length >= 3 && !chain.closed) { chain.closed = true; sfx.perfect(1); chain.by?.inputSource && app.pulse(chain.by, 0.6, 60); }
+    if (cells.length >= 4 && !chain.closed) { chain.closed = true; sfx.perfect(1); chain.by?.inputSource && app.pulse(chain.by, 0.6, 60); }
     return;
   }
   if (chain.closed) return;
@@ -195,6 +242,20 @@ function finishChain() {
   for (const d of clear) {
     grid[d.c][d.r] = null;
     burst(d);
+    if (lv) {
+      if (d.color !== STAR) countGoal(d.color);
+      if (ice[d.c][d.r]) { iceBreak(d.c, d.r); countGoal('ice'); }
+    }
+  }
+  // 石头：旁边（上下左右）有点被消掉就碎
+  if (lv) {
+    const hitStones = new Set();
+    for (const d of clear) for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = grid[d.c + dc]?.[d.r + dr];
+      if (n && n.color === STONE) hitStones.add(n);
+    }
+    for (const st of hitStones) { grid[st.c][st.r] = null; burst(st); countGoal('stone'); }
+    movesLeft--;
   }
   if (starAt) grid[starAt.c][starAt.r] = makeDot(starAt.c, starAt.r, STAR);
   drop();
@@ -204,7 +265,40 @@ function finishChain() {
   popup(`+${gained}${combo > 1 ? `  连击×${combo}` : ''}`, cells[cells.length - 1]);
   setStatus(label || (starAt ? `${cells.length} 连！留下一颗彩虹星` : combo > 1 ? `连击 ×${combo}！` : `${cells.length} 连 +${gained}`));
   chain = null;
+  if (lv) checkLevel();
   drawPanel();
+}
+// 闯关：目标完成 → 过关（剩的步数越多星越多）；步数用完 → 失败
+function checkLevel() {
+  if (goalsDone()) {
+    state = 'over';
+    const stars = movesLeft >= lv.moves * 0.3 ? 3 : movesLeft >= lv.moves * 0.1 ? 2 : 1;
+    const key = `dots-stars-${levelIdx}`;
+    if (stars > (Number(loadPref(key, '0')) || 0)) savePref(key, String(stars));
+    levelWon = stars;
+    sfx.win();
+    app.pulseAll(0.7, 200);
+    setStatus(`过关！${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}  马上进入下一关…`);
+    const mine = levelIdx;
+    setTimeout(() => { if (mode === 'levels' && levelIdx === mine && state === 'over') gotoLevel(levelIdx + 1); }, 3200);
+  } else if (movesLeft <= 0) {
+    state = 'over';
+    levelWon = 0;
+    sfx.boom();
+    setStatus('步数用完了！按 A/X 再试一次');
+  }
+}
+let levelWon = 0;
+function gotoLevel(i) {
+  levelIdx = Math.max(0, i);
+  savePref('dots-level', String(levelIdx));
+  newGame('levels');
+}
+function iceBreak(c, r) {
+  const m = ice[c][r];
+  ice[c][r] = null;
+  effects.push({ t: 0, life: 0.3, update: (k) => { m.scale.setScalar(1 + k * 0.5); m.material = iceMat; }, done: () => board.remove(m) });
+  sfx.smash?.();
 }
 function cancelChain() {
   if (chain) disposeLine(chain.line);
@@ -223,7 +317,7 @@ function drop() {
 }
 // 如果没有任何能连 3 个的地方，就把颜色打乱
 function hasMove() {
-  const all = grid.flat();
+  const all = grid.flat().filter((d) => d && d.color !== STONE);
   for (const a of all) {
     for (const b of all) {
       if (!adjacent(a, b) || !canJoin([a], b)) continue;
@@ -235,7 +329,7 @@ function hasMove() {
 function ensureMove() {
   let guard = 0;
   while (!hasMove() && guard++ < 20) {
-    for (const d of grid.flat()) if (d.color !== STAR) { d.color = randColor(); d.mesh.material = dotMats[d.color]; }
+    for (const d of grid.flat()) if (d.color !== STAR && d.color !== STONE) { d.color = randColor(); d.mesh.material = dotMats[d.color]; }
   }
 }
 
@@ -343,7 +437,7 @@ function popup(text, d) {
 
 // ================= 面板 =================
 const panelGroup = new THREE.Group();
-panelGroup.position.set(-0.7, 0.05, 0.04);
+panelGroup.position.set(-BOARD_W / 2 - 0.36, -0.12, 0.12);
 panelGroup.rotation.y = 0.55;
 rig.add(panelGroup);
 const panel = makeCanvasPlane(0.58, 0.3, 1400);
@@ -356,20 +450,44 @@ const mk = (label, x, y, color, onClick, w = 0.28) => {
   uiButtons.push(b);
   return b;
 };
-const endlessBtn = mk('无尽模式', -0.145, -0.2, '#2f3f6e', () => newGame('endless'));
-const timedBtn = mk('60 秒挑战', 0.145, -0.2, '#2f3f6e', () => newGame('timed'));
-const c5Btn = mk('5 种颜色', -0.145, -0.275, '#2f3f6e', () => newGame(mode, 5));
-const c6Btn = mk('6 种颜色', 0.145, -0.275, '#2f3f6e', () => newGame(mode, 6));
+const levelsBtn = mk('闯关', -0.193, -0.2, '#2f3f6e', () => newGame('levels'), 0.185);
+const endlessBtn = mk('无尽', 0, -0.2, '#2f3f6e', () => newGame('endless', nColors === 4 ? 5 : nColors), 0.185);
+const timedBtn = mk('60 秒', 0.193, -0.2, '#2f3f6e', () => newGame('timed', nColors === 4 ? 5 : nColors), 0.185);
+// 第二排：闯关时是“上一关 / 下一关”，其他模式是颜色数
+const opt1 = mk('', -0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLevel(levelIdx - 1) : newGame(mode, 5)));
+const opt2 = mk('', 0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLevel(levelIdx + 1) : newGame(mode, 6)));
 mk('重新开始 A/X', -0.145, -0.35, '#3a5bd9', () => newGame());
 mk('移到面前 B/Y', 0.145, -0.35, '#3a5bd9', () => placeInFront());
-const envButton = mk('背景：… ▶', 0, -0.425, '#5a4a2e', () => envs.next(), 0.57);
+const envButton = mk('背景：… ▶', -0.07, -0.425, '#5a4a2e', () => envs.next(), 0.43);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
+{
+  const exitButton = makeExitButton(app, { width: 0.13, height: 0.065 });
+  exitButton.userData.ui.setLabel('✕ 退出');
+  exitButton.position.set(0.222, -0.425, 0);
+  panelGroup.add(exitButton);
+  uiButtons.push(exitButton);
+}
 
 function refreshButtons() {
+  levelsBtn.userData.ui.setActive(mode === 'levels');
   endlessBtn.userData.ui.setActive(mode === 'endless');
   timedBtn.userData.ui.setActive(mode === 'timed');
-  c5Btn.userData.ui.setActive(nColors === 5);
-  c6Btn.userData.ui.setActive(nColors === 6);
+  if (mode === 'levels') {
+    opt1.userData.ui.setLabel('◀ 上一关'); opt2.userData.ui.setLabel('下一关 ▶');
+    opt1.userData.ui.setActive(false); opt2.userData.ui.setActive(false);
+    opt1.userData.ui.setDisabled(levelIdx === 0);
+    opt2.userData.ui.setDisabled(levelIdx >= maxUnlocked());
+  } else {
+    opt1.userData.ui.setLabel('5 种颜色'); opt2.userData.ui.setLabel('6 种颜色');
+    opt1.userData.ui.setDisabled(false); opt2.userData.ui.setDisabled(false);
+    opt1.userData.ui.setActive(nColors === 5); opt2.userData.ui.setActive(nColors === 6);
+  }
+}
+// 过了的关卡后面一关才能玩
+function maxUnlocked() {
+  let i = 0;
+  while ((Number(loadPref(`dots-stars-${i}`, '0')) || 0) > 0) i++;
+  return i;
 }
 const bestKey = () => `dots-best-${mode}-${nColors}`;
 function drawPanel() {
@@ -393,14 +511,31 @@ function drawPanel() {
     ctx.textAlign = 'left';
     ctx.font = `600 38px ${FONT}`;
     ctx.fillStyle = '#c9d3ea';
-    ctx.fillText(mode === 'timed' ? `剩余 ${Math.ceil(timeLeft)} 秒` : '无尽模式', 40, 160);
-    ctx.fillText(`最佳 ${best}`, 330, 160);
+    if (mode === 'levels') {
+      ctx.fillText(`第 ${levelIdx + 1} 关`, 40, 160);
+      ctx.fillStyle = movesLeft <= 3 ? '#ff6b6b' : '#c9d3ea';
+      ctx.fillText(`剩 ${movesLeft} 步`, 230, 160);
+      // 目标：彩色圆点 / 冰块 / 石头 + 还剩几个
+      let x = 430;
+      for (const [k, v] of Object.entries(goals)) {
+        ctx.beginPath();
+        if (k === 'ice') { ctx.fillStyle = '#bfe9ff'; ctx.fillRect(x - 18, 142, 36, 36); }
+        else if (k === 'stone') { ctx.fillStyle = '#8b8580'; ctx.arc(x, 160, 18, 0, Math.PI * 2); ctx.fill(); }
+        else { ctx.fillStyle = COLORS[k]; ctx.arc(x, 160, 18, 0, Math.PI * 2); ctx.fill(); }
+        ctx.fillStyle = v <= 0 ? '#5cffb0' : '#eef2fb';
+        ctx.fillText(v <= 0 ? '✓' : String(v), x + 26, 160);
+        x += 120;
+      }
+    } else {
+      ctx.fillText(mode === 'timed' ? `剩余 ${Math.ceil(timeLeft)} 秒` : '无尽模式', 40, 160);
+      ctx.fillText(`最佳 ${best}`, 330, 160);
+    }
     ctx.font = `700 38px ${FONT}`;
     ctx.fillStyle = state === 'over' ? '#5cffb0' : '#eef2fb';
     ctx.fillText(statusText, 40, 290);
     ctx.font = `500 28px ${FONT}`;
     ctx.fillStyle = '#8f9bb8';
-    ctx.fillText('连成圈消掉整个颜色 · 6 连以上得彩虹星', 40, 360);
+    ctx.fillText(mode === 'levels' ? '冰块：在它上面消点 · 石头：旁边消点就碎' : '连成圈消掉整个颜色 · 6 连以上得彩虹星', 40, 360);
   });
 }
 function setStatus(t) { statusText = t; drawPanel(); }
@@ -415,11 +550,12 @@ function timeUp() {
 }
 
 let placeAfter = -1;
+// 面板最底边在胸口高度，离你一臂远（试玩反馈）
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
   const f = app.headForward(new THREE.Vector3());
-  const y = app.presenting ? head.y - 0.3 : 1.25;
-  rig.position.set(head.x + f.x * 0.45, y, head.z + f.z * 0.45);
+  const y = (app.presenting ? head.y - CHEST : 1.3) + BOARD_H / 2;
+  rig.position.set(head.x + f.x * ARM, y, head.z + f.z * ARM);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
   sfx.click();
 }
@@ -539,9 +675,9 @@ app.on('select', (c) => {
 app.on('selectend', (c) => { if (chain?.by === c) finishChain(); });
 
 // ================= 电脑上预览：按住鼠标拖过去 =================
-camera.position.set(0, 1.35, 0.55);
+camera.position.set(0, 1.6, 0.75);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.25, -0.45);
+controls.target.set(0, 1.3 + BOARD_H / 2, -ARM);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
@@ -588,8 +724,9 @@ let desktopPreview = false;
 for (const e of ENVIRONMENTS) envSelect.add(new Option(e.label, e.key));
 envSelect.value = savedEnvKey();
 envSelect.addEventListener('change', () => envs.set(envSelect.value));
-mode = loadPref('dots-mode', 'endless') === 'timed' ? 'timed' : 'endless';
+mode = ['levels', 'endless', 'timed'].includes(loadPref('dots-mode', 'levels')) ? loadPref('dots-mode', 'levels') : 'levels';
 nColors = loadPref('dots-colors', '5') === '6' ? 6 : 5;
+levelIdx = Math.min(Number(loadPref('dots-level', '0')) || 0, maxUnlocked());
 modeSelect.value = mode;
 modeSelect.addEventListener('change', () => newGame(modeSelect.value));
 
@@ -618,6 +755,7 @@ newGame(mode, nColors);
 window.dotsgame = {
   get state() { return state; }, get score() { return score; }, get grid() { return grid; }, get chain() { return chain; },
   get combo() { return combo; },
-  newGame, startChain, touchDot, finishChain, hasMove, camera, controls, envs, rig,
+  newGame, startChain, touchDot, finishChain, hasMove, camera, controls, envs, rig, gotoLevel,
+  get goals() { return goals; }, get movesLeft() { return movesLeft; }, get ice() { return ice; }, get levelIdx() { return levelIdx; },
   setTime(t) { timeLeft = t; },
 };
