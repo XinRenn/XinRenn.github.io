@@ -7,29 +7,26 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { makeExitButton } from '../../shared/exit.js';
-import { RAINBOW, createState, trySwap, resolveStep, gravity, hasMove, reshuffle, ensureProgress, goalsDone, adjacent } from './logic.js';
-import { levelSpec } from './levels.js';
+import { createWallBoard } from '../../shared/wallboard.js';
+import { RAINBOW, createState, trySwap, resolveStep, gravity, hasMove, reshuffle, goalsDone, adjacent } from './logic.js';
+import { makeRng } from '../../shared/rng.js';
+import { levelSpec, LEVEL_COUNT, GOAL_WEIGHT } from './levels.js';
 
 // ================= 可调参数 =================
 const COLS = 8, ROWS = 8;
 const GAP = 0.1;            // 星石间距（米）：整块约 0.85 × 0.85 米
-// 面板离你多远：默认 1 米（试玩反馈：0.6 米太近），面板上可以拉远/拉近，会记住
-const ARM_DEFAULT = 1.0, ARM_MIN = 0.45, ARM_MAX = 1.8, ARM_STEP = 0.15;
-let ARM = THREE.MathUtils.clamp(Number(loadPref('swap-dist', String(ARM_DEFAULT))) || ARM_DEFAULT, ARM_MIN, ARM_MAX);
-// 高度：面板下三分之一处和眼睛平齐（面板中心比眼睛高 1/6 个面板）
-const boardY = (eyeY) => eyeY + BOARD_H / 6;
 const TIP = 0.045;          // 尖端在手柄前方多远
 const TOUCH_Z = 0.08;       // 尖端离墙面多近算“手碰到”（再远就用射线）
 const DRAG = 0.5;           // 按住后往旁边拖超过多少格就交换
 const BOARD_W = COLS * GAP + 0.05, BOARD_H = ROWS * GAP + 0.05;
 // 6 种星石：每种颜色有自己的形状（色弱也分得清）
 const KINDS = [
-  { color: '#ff4d5e', name: '红' },
-  { color: '#ffd23f', name: '黄' },
-  { color: '#3ddc84', name: '绿' },
-  { color: '#3a86ff', name: '蓝' },
-  { color: '#b15cff', name: '紫' },
-  { color: '#ff9f1c', name: '橙' },
+  { color: '#ff3d6e', name: '红' },
+  { color: '#ffc928', name: '黄' },
+  { color: '#2fd27a', name: '绿' },
+  { color: '#2f8cff', name: '蓝' },
+  { color: '#a64dff', name: '紫' },
+  { color: '#ff8a1f', name: '橙' },
 ];
 
 // ================= 场景 =================
@@ -56,25 +53,27 @@ function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_)
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
 const rig = new THREE.Group();   // 原点 = 星石墙中心
-rig.position.set(0, boardY(1.6), -ARM);
 scene.add(rig);
 const board = new THREE.Group();
 rig.add(board);
 {
   const back = makeCanvasPlane(BOARD_W, BOARD_H, 600);
   back.redraw((ctx, cw, ch) => {
+    // 深紫色的底板 + 每格一块圆角小方砖
     roundRect(ctx, 4, 4, cw - 8, ch - 8, 40);
-    ctx.fillStyle = 'rgba(20, 16, 40, 0.78)';
+    const bg = ctx.createLinearGradient(0, 0, 0, ch);
+    bg.addColorStop(0, 'rgba(46, 30, 92, 0.92)');
+    bg.addColorStop(1, 'rgba(22, 16, 52, 0.92)');
+    ctx.fillStyle = bg;
     ctx.fill();
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = 'rgba(200, 170, 255, 0.5)';
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = 'rgba(255, 214, 120, 0.75)';
     ctx.stroke();
-    // 棋盘格
     const cs = (cw - 30) / COLS;
     for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-      if ((c + r) % 2) continue;
-      ctx.fillStyle = 'rgba(255,255,255,0.06)';
-      ctx.fillRect(15 + c * cs, 15 + r * cs, cs, cs);
+      roundRect(ctx, 15 + c * cs + 3, 15 + r * cs + 3, cs - 6, cs - 6, 12);
+      ctx.fillStyle = (c + r) % 2 ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.13)';
+      ctx.fill();
     }
   });
   back.mesh.position.z = -0.04;
@@ -86,31 +85,66 @@ const cellAt = (x, y) => {
   return c >= 0 && r >= 0 && c < COLS && r < ROWS ? [c, r] : null;
 };
 
-// ================= 星石的样子 =================
-function starShape(R, r, n = 5) {
-  const s = new THREE.Shape();
-  for (let i = 0; i < n * 2; i++) {
-    const a = Math.PI / 2 + i * Math.PI / n, rad = i % 2 ? r : R;
-    i ? s.lineTo(Math.cos(a) * rad, Math.sin(a) * rad) : s.moveTo(Math.cos(a) * rad, Math.sin(a) * rad);
+// ================= 星石的样子：圆润、亮晶晶的糖果宝石（全部用代码做的形状）=================
+const S = 0.034; // 星石大小（半径）
+// 用“极坐标半径函数”画出一个平面形状，再挤出来、倒很大的圆角
+function polarShape(rOf, n = 72) {
+  const sh = new THREE.Shape();
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2, r = rOf(a);
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    i ? sh.lineTo(x, y) : sh.moveTo(x, y);
   }
-  return s;
+  sh.closePath();
+  return sh;
 }
-const S = 0.034; // 星石大小
+function heartShape(R) {
+  const sh = new THREE.Shape();
+  for (let i = 0; i <= 72; i++) {
+    const t = (i / 72) * Math.PI * 2;
+    const x = 16 * Math.sin(t) ** 3, y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    i ? sh.lineTo(x * R / 17, y * R / 17 + R * 0.12) : sh.moveTo(x * R / 17, y * R / 17 + R * 0.12);
+  }
+  return sh;
+}
+const poly = (k, R, round = 0.12) => (a) => {
+  const seg = (Math.PI * 2) / k;
+  const t = ((a - Math.PI / 2) % seg + seg) % seg - seg / 2;
+  return (R * Math.cos(Math.PI / k)) / Math.cos(t) * (1 - round) + R * round;
+};
+function gemGeo(shape) {
+  const g = new THREE.ExtrudeGeometry(shape, { depth: S * 0.45, bevelEnabled: true, bevelThickness: S * 0.32, bevelSize: S * 0.22, bevelSegments: 5, curveSegments: 24 });
+  g.center();
+  g.computeVertexNormals();
+  return g;
+}
 const GEOS = [
-  new THREE.SphereGeometry(S, 24, 16),                                                              // 红：圆珠
-  new THREE.ExtrudeGeometry(starShape(S * 1.15, S * 0.5), { depth: S * 0.6, bevelEnabled: true, bevelSize: S * 0.12, bevelThickness: S * 0.12, bevelSegments: 2 }).translate(0, 0, -S * 0.3), // 黄：星星
-  new THREE.OctahedronGeometry(S * 1.15, 0),                                                         // 绿：菱形宝石
-  new THREE.BoxGeometry(S * 1.45, S * 1.45, S * 1.45),                                               // 蓝：方块
-  new THREE.ConeGeometry(S * 1.05, S * 1.9, 3).rotateY(Math.PI / 6),                                 // 紫：三角锥
-  new THREE.TorusGeometry(S * 0.72, S * 0.34, 12, 24),                                               // 橙：圆环
+  gemGeo(heartShape(S * 0.95)),                                              // 红：爱心
+  gemGeo(polarShape((a) => { const seg = Math.PI * 2 / 5; const t = Math.abs((((a - Math.PI / 2) % seg) + seg) % seg - seg / 2) / (seg / 2); return S * (0.5 + 0.55 * t); }, 100)), // 黄：星星
+  gemGeo(polarShape((a) => S * 0.95 / Math.pow(Math.abs(Math.cos(a)) ** 3 + Math.abs(Math.sin(a)) ** 3, 1 / 3) * 0.78)), // 绿：圆角方块（转 45° 变菱形）
+  gemGeo(polarShape(poly(6, S * 0.92))),                                     // 蓝：六边形
+  gemGeo(polarShape(poly(3, S * 1.05, 0.2))),                                // 紫：圆角三角
+  gemGeo(polarShape((a) => S * (0.74 + 0.22 * Math.cos(5 * a)))),            // 橙：小花
 ];
-const rainbowGeo = new THREE.IcosahedronGeometry(S * 1.15, 0);
-const MATS = KINDS.map((k) => new THREE.MeshStandardMaterial({ color: k.color, roughness: 0.25, metalness: 0.15, emissive: k.color, emissiveIntensity: 0.15, flatShading: true }));
-const rainbowMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.15, metalness: 0.4, emissive: '#ffffff', emissiveIntensity: 0.4, flatShading: true });
+GEOS[2].rotateZ(Math.PI / 4);
+const rainbowGeo = (() => {
+  const g = new THREE.SphereGeometry(S * 0.95, 32, 20);
+  const col = [];
+  const c = new THREE.Color();
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) { c.setHSL((Math.atan2(p.getY(i), p.getX(i)) / (Math.PI * 2) + 1) % 1, 0.85, 0.6); col.push(c.r, c.g, c.b); }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return g;
+})();
+const MATS = KINDS.map((k) => new THREE.MeshPhysicalMaterial({ color: k.color, roughness: 0.22, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.08, emissive: k.color, emissiveIntensity: 0.18 }));
+const rainbowMat = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.05, emissive: '#ffffff', emissiveIntensity: 0.15 });
+// 高光：左上角一小块白色，看起来亮晶晶的
+const shineGeo = new THREE.CircleGeometry(S * 0.22, 20);
+const shineMat = new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.75, depthWrite: false });
 const stripeMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
-const stripeGeo = new THREE.BoxGeometry(S * 2.3, S * 0.32, S * 0.32);
-const bombRingGeo = new THREE.TorusGeometry(S * 1.2, S * 0.12, 8, 28);
-const bombRingMat = new THREE.MeshBasicMaterial({ color: '#fff3b0' });
+const stripeGeo = new THREE.BoxGeometry(S * 2.1, S * 0.22, S * 0.15);
+const bombRingGeo = new THREE.TorusGeometry(S * 1.12, S * 0.1, 10, 36);
+const bombRingMat = new THREE.MeshBasicMaterial({ color: '#ffe48a' });
 const iceGeo = new THREE.BoxGeometry(GAP * 0.92, GAP * 0.92, 0.012);
 const iceMat = new THREE.MeshStandardMaterial({ color: '#bfe9ff', roughness: 0.1, transparent: true, opacity: 0.55, emissive: '#7fd3ff', emissiveIntensity: 0.25 });
 
@@ -118,9 +152,14 @@ function makePieceMesh(p) {
   const g = new THREE.Group();
   const body = new THREE.Mesh(p.color === RAINBOW ? rainbowGeo : GEOS[p.color], p.color === RAINBOW ? rainbowMat : MATS[p.color]);
   g.add(body);
+  const shine = new THREE.Mesh(shineGeo, shineMat);
+  shine.scale.set(1.3, 0.75, 1);
+  shine.rotation.z = 0.6;
+  shine.position.set(-S * 0.38, S * 0.4, S * 0.62);
+  g.add(shine);
   if (p.special === 'row' || p.special === 'col') {
     const st = new THREE.Mesh(stripeGeo, stripeMat);
-    st.position.z = S * 0.9;
+    st.position.z = S * 0.6;
     if (p.special === 'col') st.rotation.z = Math.PI / 2;
     g.add(st);
   }
@@ -149,8 +188,8 @@ function newGame(m = mode) {
   savePref('swap-mode', mode);
   if (mode === 'levels') {
     lv = levelSpec(levelIdx);
-    S0 = createState({ cols: COLS, rows: ROWS, nColors: lv.colors, goals: lv.goals, moves: lv.moves, ice: lv.ice || 0 });
-    ensureProgress(S0);
+    // 每关固定种子：开局和每次掉下来的星石都一样，同一关可以研究怎么过
+    S0 = createState({ cols: COLS, rows: ROWS, nColors: lv.colors, goals: lv.goals, moves: lv.moves, ice: lv.ice || 0, rand: makeRng(lv.seed), goalWeight: GOAL_WEIGHT });
   } else {
     lv = null;
     S0 = createState({ cols: COLS, rows: ROWS, nColors: 6 });
@@ -257,10 +296,6 @@ async function doSwap(a, b) {
     await wait(0.28);
   }
   if (!hasMove(S0)) { reshuffle(S0); syncAll(); setStatus('没有能换的了，重新洗一下'); }
-  if (lv && !goalsDone(S0)) {
-    const changed = ensureProgress(S0);
-    if (changed.length) syncAll();
-  }
   state = 'playing';
   if (mode === 'endless' && S0.score > best) { best = S0.score; savePref('swap-best-endless', String(best)); }
   if (lv) checkLevel();
@@ -277,6 +312,7 @@ function checkLevel() {
     app.pulseAll(0.7, 200);
     setStatus(`过关！${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}  马上进入下一关…`);
     const mine = levelIdx;
+    if (levelIdx >= LEVEL_COUNT - 1) { setStatus(`全部 ${LEVEL_COUNT} 关都过了！${'★'.repeat(stars)}`); return; }
     setTimeout(() => { if (mode === 'levels' && levelIdx === mine && state === 'won') gotoLevel(levelIdx + 1); }, 3200);
   } else if (S0.moves <= 0) {
     state = 'lost';
@@ -285,7 +321,7 @@ function checkLevel() {
   }
 }
 function gotoLevel(i) {
-  levelIdx = Math.max(0, Math.min(i, maxUnlocked()));
+  levelIdx = Math.max(0, Math.min(i, maxUnlocked(), LEVEL_COUNT - 1));
   savePref('swap-level', String(levelIdx));
   newGame('levels');
 }
@@ -331,7 +367,6 @@ function popup(text, at) {
 
 // ================= 面板（在左边，稍微转过来对着你）=================
 const panelGroup = new THREE.Group();
-panelGroup.position.set(-BOARD_W / 2 - 0.36, -0.12, 0.12);
 panelGroup.rotation.y = 0.55;
 rig.add(panelGroup);
 const panel = makeCanvasPlane(0.6, 0.38, 1100);
@@ -351,15 +386,11 @@ const prevBtn = mk('◀ 上一关', -0.145, -0.275, '#2f3f6e', () => gotoLevel(l
 const nextBtn = mk('下一关 ▶', 0.145, -0.275, '#2f3f6e', () => gotoLevel(levelIdx + 1));
 mk('重新开始 A/X', -0.145, -0.35, '#3a5bd9', () => newGame());
 mk('移到面前 B/Y', 0.145, -0.35, '#3a5bd9', () => placeInFront());
-// 拉近 / 拉远：每次 15 厘米，记住你的设置
-function nudgeDistance(d) {
-  ARM = THREE.MathUtils.clamp(Math.round((ARM + d) * 100) / 100, ARM_MIN, ARM_MAX);
-  savePref('swap-dist', String(ARM));
-  placeInFront();
-  setStatus(`面板距离 ${ARM.toFixed(2)} 米${ARM > 0.75 ? '（手够不着时用射线）' : ''}`);
-}
-mk('◀ 拉近', -0.145, -0.5, '#2e5a46', () => nudgeDistance(-ARM_STEP));
-mk('拉远 ▶', 0.145, -0.5, '#2e5a46', () => nudgeDistance(ARM_STEP));
+// 摆放（试玩反馈）：默认离你 1 米、面板下三分之一和眼睛平齐；摇杆前后推 = 拉远/拉近；面板下面的滑条 = 放大/缩小。都会记住。
+const wall = createWallBoard(app, {
+  rig, board, width: BOARD_W, height: BOARD_H, key: 'swap', dist: 1.0,
+  onLayout: (k, w) => panelGroup.position.set(-w / 2 - 0.36, -0.12, 0.12),
+});
 const envButton = mk('背景：… ▶', -0.07, -0.425, '#5a4a2e', () => envs.next(), 0.43);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
 {
@@ -372,7 +403,7 @@ function refreshButtons() {
   levelsBtn.userData.ui.setActive(mode === 'levels');
   endlessBtn.userData.ui.setActive(mode === 'endless');
   prevBtn.userData.ui.setDisabled(mode !== 'levels' || levelIdx === 0);
-  nextBtn.userData.ui.setDisabled(mode !== 'levels' || levelIdx >= maxUnlocked());
+  nextBtn.userData.ui.setDisabled(mode !== 'levels' || levelIdx >= maxUnlocked() || levelIdx >= LEVEL_COUNT - 1);
 }
 function drawPanel() {
   panel.redraw((ctx, w, h) => {
@@ -425,11 +456,7 @@ function setStatus(t) { statusText = t; drawPanel(); }
 // 面板最底边在胸口高度，离你一臂远
 let placeAfter = -1;
 function placeInFront() {
-  const head = app.headPosition(new THREE.Vector3());
-  const f = app.headForward(new THREE.Vector3());
-  const y = boardY(app.presenting ? head.y : 1.6);
-  rig.position.set(head.x + f.x * ARM, y, head.z + f.z * ARM);
-  rig.rotation.y = Math.atan2(-f.x, -f.z);
+  wall.place();
   sfx.click();
 }
 
@@ -503,10 +530,10 @@ function updatePointers() {
     if (!c.inputSource) { tip.visible = false; return; }
     tip.visible = true;
     tipWorld(c, tip.position);
-    const hit = app.pointAt(c, uiButtons, 4);
+    const hit = app.pointAt(c, [...uiButtons, wall.hitMesh], 4);
     c.hover = hit ? hit.object : null;
     if (c.hover) hovered.add(c.hover);
-    const bp = boardPoint(c);
+    const bp = wall.dragging ? null : boardPoint(c);
     c.bp = bp;
     c.line.visible = !!hit || (bp && !bp.touch);
     tip.material.color.set(select?.by === c ? '#ffd23f' : bp?.touch ? '#5cffb0' : '#ffffff');
@@ -517,15 +544,17 @@ function updatePointers() {
 app.on('select', (c) => {
   initAudio();
   if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
+  if (wall.press(c)) { app.pulse(c, 0.3, 25); return; }
   if (state === 'lost' || state === 'won') return;
   const bp = boardPoint(c);
   if (bp) { press(c, bp.p); app.pulse(c, 0.3, 25); }
 });
-app.on('selectend', (c) => release(c));
+app.on('selectend', (c) => { wall.release(c); release(c); });
 
 // ================= 每一帧 =================
 function onFrame(dt) {
   envs.update(dt);
+  wall.update(dt);
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeInFront(); }
     updatePointers();
@@ -546,7 +575,7 @@ function onFrame(dt) {
       else m.position.copy(t);
     }
     m.userData.spin += dt;
-    m.userData.body.rotation.y = Math.sin(m.userData.spin * 0.8) * 0.35;
+    m.userData.body.rotation.y = Math.sin(m.userData.spin * 0.8) * 0.22;
     if (m.userData.color === RAINBOW) m.userData.body.material.emissive.setHSL((performance.now() / 2000) % 1, 0.9, 0.5);
     if (m.userData.pop > 0) { m.userData.pop -= dt; m.scale.setScalar(1 + Math.max(0, m.userData.pop) * 1.6); }
   }
@@ -563,7 +592,7 @@ function onFrame(dt) {
 // ================= 电脑上预览：按住拖动，或者点一颗再点旁边那颗 =================
 camera.position.set(0, 1.65, 0.35);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, boardY(1.6), -ARM);
+controls.target.set(0, 1.6 + BOARD_H / 6, -1.0);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
@@ -583,14 +612,16 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   mouseRay.setFromCamera(mouse, camera);
   const ui = mouseRay.intersectObjects(uiButtons, false)[0];
   if (ui) { ui.object.userData.ui.onClick?.(); return; }
+  if (wall.press('mouse', mouseRay)) { controls.enabled = false; return; }
   const p = mousePoint(e);
   if (p && cellAt(p.x, p.y)) { controls.enabled = false; press('mouse', p); }
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!app.presenting && wall.dragging) { mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); mouseRay.setFromCamera(mouse, camera); wall.drag('mouse', mouseRay); return; }
   if (app.presenting || !select?.held) return;
   dragTo('mouse', mousePoint(e));
 });
-window.addEventListener('pointerup', () => { release('mouse'); controls.enabled = true; });
+window.addEventListener('pointerup', () => { wall.release('mouse'); release('mouse'); controls.enabled = true; });
 window.addEventListener('keydown', (e) => { if (e.code === 'KeyR' && !app.presenting) newGame(); });
 
 // ================= 页面 =================
@@ -608,7 +639,7 @@ for (const e of ENVIRONMENTS) envSelect.add(new Option(e.label, e.key));
 envSelect.value = savedEnvKey();
 envSelect.addEventListener('change', () => envs.set(envSelect.value));
 mode = loadPref('swap-mode', 'levels') === 'endless' ? 'endless' : 'levels';
-levelIdx = Math.min(Number(loadPref('swap-level', '0')) || 0, maxUnlocked());
+levelIdx = Math.min(Number(loadPref('swap-level', '0')) || 0, maxUnlocked(), LEVEL_COUNT - 1);
 modeSelect.value = mode;
 modeSelect.addEventListener('change', () => newGame(modeSelect.value));
 
@@ -636,5 +667,5 @@ newGame(mode);
 // 调试用
 window.swapgame = {
   get state() { return state; }, get S() { return S0; }, get levelIdx() { return levelIdx; },
-  newGame, gotoLevel, doSwap, camera, controls, envs, rig,
+  newGame, gotoLevel, doSwap, camera, controls, envs, rig, wall,
 };

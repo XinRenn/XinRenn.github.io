@@ -11,18 +11,15 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { makeExitButton } from '../../shared/exit.js';
-import { LEVELS, levelSpec, GOAL_WEIGHT } from './levels.js';
+import { createWallBoard } from '../../shared/wallboard.js';
+import { LEVEL_COUNT, levelSpec, GOAL_WEIGHT } from './levels.js';
+import { makeRng, shuffleWith } from '../../shared/rng.js';
 
 // ================= 可调参数 =================
 const COLS = 8, ROWS = 9;
 const GAP = 0.11;           // 圆点间距（米）：整块大约 0.9 × 1 米
 const DOT_R = 0.036;        // 圆点半径
 const TOUCH = 0.046;        // 手柄尖端离圆点中心多近算碰到
-// 面板离你多远：默认 1 米（试玩反馈：0.6 米太近），面板上可以拉远/拉近，会记住
-const ARM_DEFAULT = 1.0, ARM_MIN = 0.45, ARM_MAX = 1.8, ARM_STEP = 0.15;
-let ARM = THREE.MathUtils.clamp(Number(loadPref('dots-dist', String(ARM_DEFAULT))) || ARM_DEFAULT, ARM_MIN, ARM_MAX);
-// 高度：面板下三分之一处和眼睛平齐（面板中心比眼睛高 1/6 个面板）
-const boardY = (eyeY) => eyeY + BOARD_H / 6;
 const TIP = 0.045;          // 尖端在手柄前方多远
 const COMBO_WINDOW = 3;     // 几秒内接着消算连击
 const TIMED_SECONDS = 60;
@@ -55,7 +52,6 @@ function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_)
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
 const rig = new THREE.Group();   // 原点 = 圆点墙中心
-rig.position.set(0, boardY(1.6), -ARM);
 scene.add(rig);
 const board = new THREE.Group();
 rig.add(board);
@@ -127,11 +123,12 @@ function makeDot(c, r, color, fromRow = r) {
   return d;
 }
 // 闯关时，还没完成的目标颜色掉下来得多一些（保证能过关；离线机器人测试过每一关）
+let rng = Math.random;   // 闯关：每关固定种子（同一关每次开局、每次掉下来的颜色都一样）
 function randColor() {
   if (!lv) return Math.floor(Math.random() * nColors);
   const w = [];
   for (let i = 0; i < nColors; i++) w.push(goals[i] > 0 ? GOAL_WEIGHT : 1);
-  let t = Math.random() * w.reduce((a, b) => a + b, 0);
+  let t = rng() * w.reduce((a, b) => a + b, 0);
   for (let i = 0; i < nColors; i++) { t -= w[i]; if (t < 0) return i; }
   return nColors - 1;
 }
@@ -141,6 +138,7 @@ function newGame(m = mode, colors = nColors) {
   savePref('dots-mode', mode);
   if (mode === 'levels') {
     lv = levelSpec(levelIdx);
+    rng = makeRng(lv.seed);
     nColors = lv.colors;
     movesLeft = lv.moves;
     goals = { ...lv.goals };
@@ -158,8 +156,7 @@ function newGame(m = mode, colors = nColors) {
     const cells = [];
     for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) cells.push([c, r]);
     const pick = (n, filter) => {
-      const pool = cells.filter(filter).sort(() => Math.random() - 0.5);
-      return pool.slice(0, n);
+      return shuffleWith(rng, cells.filter(filter)).slice(0, n);
     };
     for (const [c, r] of pick(goals.ice || 0, ([, r]) => r < Math.ceil(ROWS * 0.6))) {
       const m = new THREE.Mesh(iceGeo, iceMat);
@@ -173,7 +170,6 @@ function newGame(m = mode, colors = nColors) {
     }
   }
   ensureMove();
-  if (lv) ensureProgress();
   state = 'playing';
   score = 0; combo = 0; lastClear = -99; timeLeft = TIMED_SECONDS;
   cancelChain();
@@ -272,7 +268,6 @@ function finishChain() {
   if (starAt) grid[starAt.c][starAt.r] = makeDot(starAt.c, starAt.r, STAR);
   drop();
   ensureMove();
-  if (lv && !goalsDone()) ensureProgress();
   sfx.perfect(Math.min(3, Math.floor(cells.length / 2)));
   app.pulseAll(0.5 + Math.min(0.5, n * 0.04), 80);
   popup(`+${gained}${combo > 1 ? `  连击×${combo}` : ''}`, cells[cells.length - 1]);
@@ -293,6 +288,7 @@ function checkLevel() {
     app.pulseAll(0.7, 200);
     setStatus(`过关！${'★'.repeat(stars)}${'☆'.repeat(3 - stars)}  马上进入下一关…`);
     const mine = levelIdx;
+    if (levelIdx >= LEVEL_COUNT - 1) { setStatus(`全部 ${LEVEL_COUNT} 关都过了！${'★'.repeat(stars)}`); return; }
     setTimeout(() => { if (mode === 'levels' && levelIdx === mine && state === 'over') gotoLevel(levelIdx + 1); }, 3200);
   } else if (movesLeft <= 0) {
     state = 'over';
@@ -303,7 +299,7 @@ function checkLevel() {
 }
 let levelWon = 0;
 function gotoLevel(i) {
-  levelIdx = Math.max(0, i);
+  levelIdx = THREE.MathUtils.clamp(i, 0, LEVEL_COUNT - 1);
   savePref('dots-level', String(levelIdx));
   newGame('levels');
 }
@@ -339,68 +335,6 @@ function hasMove() {
   }
   return false;
 }
-// 闯关保底：盘面上至少要有一条能推进目标的线（目标颜色、冰块上、石头旁边）。
-// 没有的话，就悄悄把目标附近三个点改成同一种颜色（会闪一下），保证每一关都有路可走。
-const NB = (c, r) => [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]].filter(([a, b]) => a >= 0 && b >= 0 && a < COLS && b < ROWS);
-const isStone = (c, r) => grid[c][r]?.color === STONE;
-function progressExists() {
-  for (let col = 0; col < nColors; col++) {
-    const seen = new Set();
-    for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-      const v = grid[c][r].color;
-      if ((v !== col && v !== STAR) || seen.has(c * 100 + r)) continue;
-      const comp = [];
-      const st = [[c, r]];
-      seen.add(c * 100 + r);
-      while (st.length) {
-        const [x, y] = st.pop();
-        comp.push([x, y]);
-        for (const [nx, ny] of NB(x, y)) {
-          const w = grid[nx][ny].color;
-          if ((w === col || w === STAR) && !seen.has(nx * 100 + ny)) { seen.add(nx * 100 + ny); st.push([nx, ny]); }
-        }
-      }
-      if (comp.length < 3) continue;
-      for (const [x, y] of comp) {
-        if (goals[col] > 0 && grid[x][y].color === col) return true;
-        if (goals.ice > 0 && ice[x][y]) return true;
-        if (goals.stone > 0 && NB(x, y).some(([nx, ny]) => isStone(nx, ny))) return true;
-      }
-    }
-  }
-  return false;
-}
-function ensureProgress() {
-  if (progressExists()) return;
-  const targets = [];
-  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
-    if (isStone(c, r)) continue;
-    if ((goals.ice > 0 && ice[c][r]) || (goals.stone > 0 && NB(c, r).some(([x, y]) => isStone(x, y)))) targets.push([c, r]);
-  }
-  const colorGoals = Object.keys(goals).filter((k) => /^\d+$/.test(k) && goals[k] > 0).map(Number);
-  if (!targets.length) for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (!isStone(c, r)) targets.push([c, r]);
-  const any = (a) => a[Math.floor(Math.random() * a.length)];
-  for (let tries = 0; tries < 30; tries++) {
-    const T = any(targets);
-    const As = NB(...T).filter(([x, y]) => !isStone(x, y));
-    if (!As.length) continue;
-    const A = any(As);
-    const Bs = [...NB(...A), ...NB(...T)].filter(([x, y]) => !isStone(x, y) && !(x === T[0] && y === T[1]) && !(x === A[0] && y === A[1]));
-    if (!Bs.length) continue;
-    const B = any(Bs);
-    const tc = grid[T[0]][T[1]].color;
-    const col = colorGoals.length ? any(colorGoals) : tc >= 0 ? tc : 0;
-    for (const [x, y] of [T, A, B]) {
-      const d = grid[x][y];
-      d.color = col;
-      d.mesh.geometry = dotGeo;
-      d.mesh.material = dotMats[col];
-      bump(d);
-    }
-    return;
-  }
-}
-
 function ensureMove() {
   let guard = 0;
   while (!hasMove() && guard++ < 20) {
@@ -512,7 +446,6 @@ function popup(text, d) {
 
 // ================= 面板 =================
 const panelGroup = new THREE.Group();
-panelGroup.position.set(-BOARD_W / 2 - 0.36, -0.12, 0.12);
 panelGroup.rotation.y = 0.55;
 rig.add(panelGroup);
 const panel = makeCanvasPlane(0.58, 0.3, 1400);
@@ -533,15 +466,12 @@ const opt1 = mk('', -0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLe
 const opt2 = mk('', 0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLevel(levelIdx + 1) : newGame(mode, 6)));
 mk('重新开始 A/X', -0.145, -0.35, '#3a5bd9', () => newGame());
 mk('移到面前 B/Y', 0.145, -0.35, '#3a5bd9', () => placeInFront());
-// 拉近 / 拉远：每次 15 厘米，记住你的设置
-function nudgeDistance(d) {
-  ARM = THREE.MathUtils.clamp(Math.round((ARM + d) * 100) / 100, ARM_MIN, ARM_MAX);
-  savePref('dots-dist', String(ARM));
-  placeInFront();
-  setStatus(`面板距离 ${ARM.toFixed(2)} 米${ARM > 0.75 ? '（手够不着时用射线）' : ''}`);
-}
-mk('◀ 拉近', -0.145, -0.5, '#2e5a46', () => nudgeDistance(-ARM_STEP));
-mk('拉远 ▶', 0.145, -0.5, '#2e5a46', () => nudgeDistance(ARM_STEP));
+
+// 摆放（试玩反馈）：默认离你 1 米、面板下三分之一和眼睛平齐；摇杆前后推 = 拉远/拉近；面板下面的滑条 = 放大/缩小。都会记住。
+const wall = createWallBoard(app, {
+  rig, board, width: BOARD_W, height: BOARD_H, key: 'dots', dist: 1.0,
+  onLayout: (k, w) => panelGroup.position.set(-w / 2 - 0.36, -0.12, 0.12),
+});
 const envButton = mk('背景：… ▶', -0.07, -0.425, '#5a4a2e', () => envs.next(), 0.43);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
 {
@@ -560,7 +490,7 @@ function refreshButtons() {
     opt1.userData.ui.setLabel('◀ 上一关'); opt2.userData.ui.setLabel('下一关 ▶');
     opt1.userData.ui.setActive(false); opt2.userData.ui.setActive(false);
     opt1.userData.ui.setDisabled(levelIdx === 0);
-    opt2.userData.ui.setDisabled(levelIdx >= maxUnlocked());
+    opt2.userData.ui.setDisabled(levelIdx >= maxUnlocked() || levelIdx >= LEVEL_COUNT - 1);
   } else {
     opt1.userData.ui.setLabel('5 种颜色'); opt2.userData.ui.setLabel('6 种颜色');
     opt1.userData.ui.setDisabled(false); opt2.userData.ui.setDisabled(false);
@@ -636,11 +566,7 @@ function timeUp() {
 let placeAfter = -1;
 // 面板最底边在胸口高度，离你一臂远（试玩反馈）
 function placeInFront() {
-  const head = app.headPosition(new THREE.Vector3());
-  const f = app.headForward(new THREE.Vector3());
-  const y = boardY(app.presenting ? head.y : 1.6);
-  rig.position.set(head.x + f.x * ARM, y, head.z + f.z * ARM);
-  rig.rotation.y = Math.atan2(-f.x, -f.z);
+  wall.place();
   sfx.click();
 }
 
@@ -689,12 +615,14 @@ function onFrame(dt) {
   if (app.presenting) {
     if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) placeInFront(); }
     updateControllers();
+    wall.update(dt);
     app.pollButtons((c, bi) => {
       if (bi === 4) newGame();
       if (bi === 5) placeInFront();
     });
   } else {
     controls.update();
+    wall.update(dt);
   }
 
   if (chain) {
@@ -733,7 +661,7 @@ function updateControllers() {
     const local = board.worldToLocal(tip.position.clone());
     c.near = Math.abs(local.z) < 0.08 ? dotNear(local, TOUCH) : null;
     tip.material.color.set(chain?.by === c ? colorOf(chainColor(chain.cells)) : c.near ? '#5cffb0' : '#ffffff');
-    const hit = app.pointAt(c, [...uiButtons, ...dotsMeshes], 3);
+    const hit = app.pointAt(c, [...uiButtons, wall.hitMesh, ...dotsMeshes], 4);
     c.hover = hit ? hit.object : null;
     if (c.hover) hovered.add(c.hover);
     if (chain?.by === c) {
@@ -753,22 +681,23 @@ function updateControllers() {
 app.on('select', (c) => {
   initAudio();
   if (c.hover?.userData.ui) { app.pulse(c, 0.4, 30); c.hover.userData.ui.onClick?.(); return; }
+  if (wall.press(c)) { app.pulse(c, 0.3, 25); return; }
   if (c.near) { startChain(c.near, c); if (chain) chain.mode = 'hand'; return; }
   if (c.hover?.userData.dot) { startChain(c.hover.userData.dot, c); if (chain) chain.mode = 'ray'; }
 });
-app.on('selectend', (c) => { if (chain?.by === c) finishChain(); });
+app.on('selectend', (c) => { wall.release(c); if (chain?.by === c) finishChain(); });
 
 // ================= 电脑上预览：按住鼠标拖过去 =================
 camera.position.set(0, 1.65, 0.35);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, boardY(1.6), -ARM);
+controls.target.set(0, 1.6 + BOARD_H / 6, -1.0);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
 function mouseHit(e) {
   mouse.set((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   mouseRay.setFromCamera(mouse, camera);
-  return mouseRay.intersectObjects([...uiButtons, ...grid.flat().filter(Boolean).map((d) => d.mesh)], false)[0];
+  return mouseRay.intersectObjects([...uiButtons, wall.hitMesh, ...grid.flat().filter(Boolean).map((d) => d.mesh)], false)[0];
 }
 renderer.domElement.addEventListener('pointerdown', (e) => {
   if (app.presenting) return;
@@ -776,17 +705,20 @@ renderer.domElement.addEventListener('pointerdown', (e) => {
   const hit = mouseHit(e);
   if (!hit) return;
   if (hit.object.userData.ui) { hit.object.userData.ui.onClick?.(); return; }
+  if (hit.object === wall.hitMesh) { controls.enabled = false; wall.press('mouse', mouseRay); return; }
   controls.enabled = false;
   startChain(hit.object.userData.dot, 'mouse');
   if (chain) chain.mode = 'mouse';
 });
 renderer.domElement.addEventListener('pointermove', (e) => {
+  if (!app.presenting && wall.dragging) { mouseHit(e); wall.drag('mouse', mouseRay); return; }
   if (app.presenting || chain?.by !== 'mouse') return;
   const hit = mouseHit(e);
   if (hit?.object.userData.dot) touchDot(hit.object.userData.dot);
   if (hit) chain.cursor = board.worldToLocal(hit.point.clone());
 });
 window.addEventListener('pointerup', () => {
+  wall.release('mouse');
   if (chain?.by === 'mouse') finishChain();
   controls.enabled = true;
 });
@@ -810,7 +742,7 @@ envSelect.value = savedEnvKey();
 envSelect.addEventListener('change', () => envs.set(envSelect.value));
 mode = ['levels', 'endless', 'timed'].includes(loadPref('dots-mode', 'levels')) ? loadPref('dots-mode', 'levels') : 'levels';
 nColors = loadPref('dots-colors', '5') === '6' ? 6 : 5;
-levelIdx = Math.min(Number(loadPref('dots-level', '0')) || 0, maxUnlocked());
+levelIdx = Math.min(Number(loadPref('dots-level', '0')) || 0, maxUnlocked(), LEVEL_COUNT - 1);
 modeSelect.value = mode;
 modeSelect.addEventListener('change', () => newGame(modeSelect.value));
 
@@ -839,7 +771,7 @@ newGame(mode, nColors);
 window.dotsgame = {
   get state() { return state; }, get score() { return score; }, get grid() { return grid; }, get chain() { return chain; },
   get combo() { return combo; },
-  newGame, startChain, touchDot, finishChain, hasMove, camera, controls, envs, rig, gotoLevel,
+  newGame, startChain, touchDot, finishChain, hasMove, camera, controls, envs, rig, gotoLevel, wall,
   get goals() { return goals; }, get movesLeft() { return movesLeft; }, get ice() { return ice; }, get levelIdx() { return levelIdx; },
   setTime(t) { timeLeft = t; },
 };

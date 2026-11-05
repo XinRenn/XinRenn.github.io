@@ -4,6 +4,8 @@
 // 坐标：grid[c][r]，c = 列（左→右），r = 行（下→上，0 是最下面一行）。
 // 特殊星石：4 连 → 横扫/竖扫（消掉一整行/一整列）；L 形或 T 形 → 炸弹（消掉周围 3×3）；5 连 → 彩虹（和谁换就消掉全场那个颜色）。
 
+import { shuffleWith } from '../../shared/rng.js';
+
 export const RAINBOW = -1;
 
 export function createState({ cols = 8, rows = 8, nColors = 6, goals = {}, moves = Infinity, ice = 0, rand = Math.random, goalWeight = 1.5 } = {}) {
@@ -18,7 +20,7 @@ export function createState({ cols = 8, rows = 8, nColors = 6, goals = {}, moves
   // 冰块铺在下半部分
   const spots = [];
   for (let c = 0; c < cols; c++) for (let r = 0; r < Math.ceil(rows * 0.6); r++) spots.push([c, r]);
-  spots.sort(() => rand() - 0.5);
+  shuffleWith(rand, spots); // 固定次数的洗牌：同一个种子，冰块位置每次都一样
   for (const [c, r] of spots.slice(0, ice)) s.ice[c][r] = true;
   if (ice) s.goals.ice = ice;
   if (!hasMove(s)) reshuffle(s);
@@ -250,45 +252,6 @@ export function gravity(s) {
 
 export const goalsDone = (s) => Object.values(s.goals).every((v) => v <= 0);
 
-// 这一步换完，第一轮消掉的东西里有没有目标（目标颜色、冰块；只有分数目标时任何一步都算）
-function swapProgresses(s, a, b) {
-  const onlyScore = Object.keys(s.goals).every((k) => k === 'score' || s.goals[k] <= 0);
-  if (onlyScore) return true;
-  const t = clone(s);
-  if (!trySwap(t, a, b).ok) return false;
-  const st = resolveStep(t);
-  if (!st) return false;
-  return st.ice.length > 0 || [...st.cleared, ...st.created].some((x) => x.color >= 0 && s.goals[x.color] > 0);
-}
-// 闯关保底：盘面上至少要有一步能推进目标。没有的话，就悄悄改两三颗普通星石的颜色，摆出一步来。
-// 返回改了颜色的格子（游戏里让它们闪一下）。
-export function ensureProgress(s) {
-  if (goalsDone(s)) return [];
-  if (allSwaps(s).some(([a, b]) => swapProgresses(s, a, b))) return [];
-  const colorGoals = Object.keys(s.goals).filter((k) => /^\d+$/.test(k) && s.goals[k] > 0).map(Number);
-  const targets = [];
-  for (let c = 0; c < s.cols; c++) for (let r = 0; r < s.rows; r++) if (s.goals.ice > 0 && s.ice[c][r]) targets.push([c, r]);
-  if (!targets.length) for (let c = 0; c < s.cols; c++) for (let r = 0; r < s.rows; r++) targets.push([c, r]);
-  const plain = (c, r) => inside(s, c, r) && s.grid[c][r] && !s.grid[c][r].special;
-  for (let tries = 0; tries < 60; tries++) {
-    const [c, r] = targets[Math.floor(s.rand() * targets.length)];
-    const col = colorGoals.length ? colorGoals[Math.floor(s.rand() * colorGoals.length)] : Math.floor(s.rand() * s.nColors);
-    // 横着摆：T、T+1 同色，T+2 上面（或下面）那颗同色 → 把它换下来就是 3 连
-    const dx = s.rand() < 0.5 ? 1 : -1, dy = s.rand() < 0.5 ? 1 : -1;
-    const A = [c + dx, r], B = [c + 2 * dx, r + dy], hole = [c + 2 * dx, r];
-    if (![[c, r], A, B, hole].every(([x, y]) => plain(x, y))) continue;
-    const old = [[c, r], A, B].map(([x, y]) => s.grid[x][y].color);
-    s.grid[c][r].color = col; s.grid[A[0]][A[1]].color = col; s.grid[B[0]][B[1]].color = col;
-    if (s.grid[hole[0]][hole[1]].color === col) s.grid[hole[0]][hole[1]].color = (col + 1) % s.nColors;
-    if (findRuns(s).length) { // 不能一改就直接连上了
-      [[c, r], A, B].forEach(([x, y], i) => (s.grid[x][y].color = old[i]));
-      continue;
-    }
-    return [[c, r], A, B, hole];
-  }
-  return [];
-}
-
 // 一次交换的全部结果（离线测试用：交换 → 一直消到停）
 export function playSwap(s, a, b) {
   const res = trySwap(s, a, b);
@@ -299,10 +262,9 @@ export function playSwap(s, a, b) {
     gravity(s);
   }
   if (!hasMove(s)) reshuffle(s);
-  ensureProgress(s);
   return true;
 }
 
 export function clone(s) {
-  return { ...s, goals: { ...s.goals }, grid: s.grid.map((col) => col.map((p) => (p ? { ...p } : null))), ice: s.ice.map((col) => col.slice()), pendingClear: s.pendingClear ? new Set(s.pendingClear) : null };
+  return { ...s, rand: s.rand.clone ? s.rand.clone() : s.rand, goals: { ...s.goals }, grid: s.grid.map((col) => col.map((p) => (p ? { ...p } : null))), ice: s.ice.map((col) => col.slice()), pendingClear: s.pendingClear ? new Set(s.pendingClear) : null };
 }

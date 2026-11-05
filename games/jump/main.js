@@ -17,9 +17,10 @@ const TRIGGER_FULL = 1.1;    // 扳机按住多少秒算满蓄力
 const JUMP_MIN = 0.08, JUMP_MAX = 0.95; // 蓄力 0 → 1 对应的跳跃距离（米）
 const PERFECT = 0.16;        // 落点离中心 < 跳台尺寸 × 这个比例 = 正中靶心
 const TABLE_DROP = 0.75;     // 跳台比你站立时的头低多少米
-const TABLE_AHEAD = 0.55;    // 跳台在你面前多远
+// 台子在你面前多远：默认 0.75 米（试玩反馈：0.55 太近），摇杆前后推或面板按钮可以调，会记住
+let tableDist = THREE.MathUtils.clamp(Number(loadPref('jump-table', '0.75')) || 0.75, 0.35, 1.6);
 const NEIGHBORS = 4;         // 脚下这个跳台周围保持几个跳得到的新跳台
-const SPREAD = 1.75;         // 新跳台出现在“前方”左右多大角度内（弧度，约 ±100°）
+const SPREAD = 0.7;          // 新跳台只出现在前方左右约 ±40° 以内（试玩反馈：要转 90 度时台子会跑出视野）
 const MR_ENV_OPACITY = 0.5;  // 混合现实里背景的可见度
 
 // ================= 场景 =================
@@ -55,7 +56,7 @@ const rig = new THREE.Group();
 scene.add(rig);
 const course = new THREE.Group();
 rig.add(course);
-rig.position.set(0, 0.9, -TABLE_AHEAD);
+rig.position.set(0, 0.9, -tableDist);
 
 const glowTex = (() => {
   const c = document.createElement('canvas');
@@ -197,7 +198,7 @@ function spawnAround(p, want) {
     const d = minD + Math.random() * (maxD - minD);
     const x = p.x + Math.sin(ang) * d, z = p.z - Math.cos(ang) * d;
     // 留在台子上（相对当前跳台：左右 0.8 米、前 0.85 米、后 0.25 米以内），也不和别的跳台挤在一起
-    const ok = Math.abs(x - cur.x) < 0.8 && z - cur.z < 0.25 && z - cur.z > -0.85 &&
+    const ok = Math.abs(x - cur.x) < 0.55 && z - cur.z < -0.12 && z - cur.z > -0.85 &&
       platforms.every((o) => o === q || o.dying || Math.hypot(o.x - x, o.z - z) >= (extent(o) + extent(q)) * 0.55 + 0.04);
     if (!ok) { course.remove(q.group); disposeTree(q.group); platforms.pop(); continue; }
     place(q, x, z);
@@ -207,7 +208,7 @@ function spawnAround(p, want) {
 function refreshField() {
   spawnAround(cur, NEIGHBORS);
   // 离得太远的、在后面的跳台沉下去
-  for (const p of platforms) if (p !== cur && !p.dying && (Math.hypot(p.x - cur.x, p.z - cur.z) > 1.0 || p.z > cur.z + 0.3)) p.dying = 0.001;
+  for (const p of platforms) if (p !== cur && !p.dying && (Math.hypot(p.x - cur.x, p.z - cur.z) > 1.0 || p.z > cur.z + 0.05)) p.dying = 0.001;
 }
 // 离你最近、还没去过的跳台（电脑预览/测试用）
 const nearestNext = () => reachable(cur).sort((a, b) => Math.hypot(a.x - cur.x, a.z - cur.z) - Math.hypot(b.x - cur.x, b.z - cur.z))[0] || null;
@@ -499,6 +500,12 @@ const aimButton = makeButton('', { width: 0.52, height: 0.1, color: '#2e5a46', o
 aimButton.position.set(-0.28, -0.54, 0);
 const exitButton = makeExitButton(app, { width: 0.52, height: 0.1 });
 exitButton.position.set(0.28, -0.54, 0);
+const nearBtn = makeButton('◀ 台子拉近', { width: 0.52, height: 0.1, color: '#2e4f6a', onClick: () => moveTable(-0.1) });
+nearBtn.position.set(-0.28, -0.66, 0);
+const farBtn = makeButton('台子拉远 ▶', { width: 0.52, height: 0.1, color: '#2e4f6a', onClick: () => moveTable(0.1) });
+farBtn.position.set(0.28, -0.66, 0);
+panelGroup.add(nearBtn, farBtn);
+uiButtons.push(nearBtn, farBtn);
 panelGroup.add(restartButton, moveButton, crouchButton, envButton, aimButton, exitButton);
 uiButtons.push(restartButton, moveButton, crouchButton, envButton, aimButton, exitButton);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
@@ -549,14 +556,26 @@ function setStatus(t) { statusText = t; drawPanel(); }
 
 // 把小场景放到你面前：高度 = 你站直时的头高 - TABLE_DROP
 let placeAfter = -1;
+const placeHead = new THREE.Vector3(0, 1.6, 0), placeDir = new THREE.Vector3(0, 0, -1);
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
   const f = app.headForward(new THREE.Vector3());
+  if (!app.presenting) { head.set(0, 1.6, 0); f.set(0, 0, -1); }
+  placeHead.copy(head); placeDir.copy(f);
   const standY = app.presenting ? Math.max(standHeight(), head.y) : 1.6;
-  rig.position.set(head.x + f.x * TABLE_AHEAD, THREE.MathUtils.clamp(standY - TABLE_DROP, 0.5, 1.3), head.z + f.z * TABLE_AHEAD);
+  rig.position.set(head.x + f.x * tableDist, THREE.MathUtils.clamp(standY - TABLE_DROP, 0.5, 1.3), head.z + f.z * tableDist);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
   base?.fit(rig.position.y);
   sfx.click();
+}
+
+// 台子拉远 / 拉近（沿着摆放时的方向挪，高度不变）
+let tableSaveT = 0;
+function moveTable(d) {
+  tableDist = THREE.MathUtils.clamp(tableDist + d, 0.35, 1.6);
+  rig.position.x = placeHead.x + placeDir.x * tableDist;
+  rig.position.z = placeHead.z + placeDir.z * tableDist;
+  tableSaveT = 0.5;
 }
 
 // ================= 蹲下检测 =================
@@ -584,6 +603,7 @@ const tmpHead = new THREE.Vector3();
 function onFrame(dt) {
   uTime.value += dt;
   envs.update(dt);
+  if (tableSaveT > 0) { tableSaveT -= dt; if (tableSaveT <= 0) savePref('jump-table', tableDist.toFixed(2)); }
   if (!theme) return;
 
   if (app.presenting) {
@@ -594,6 +614,11 @@ function onFrame(dt) {
       if (bi === 4) newGame();
       if (bi === 5) placeInFront();
     });
+    // 摇杆往前推 = 台子拉远，往后拉 = 台子拉近
+    for (const c of app.controllers) {
+      const ax = c.inputSource?.gamepad?.axes;
+      if (ax && ax.length >= 4 && Math.abs(ax[3]) > 0.3) moveTable(-ax[3] * 0.45 * dt);
+    }
   } else {
     controls.update();
   }
