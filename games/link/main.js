@@ -471,7 +471,7 @@ function burst(d) {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, size: 0.016, color: colorOf(d.color), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  const pts = new THREE.Points(geo, new THREE.PointsMaterial({ map: dotTex, size: 0.016, color: d.color === STONE ? "#b0aaa4" : colorOf(d.color), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
   board.add(pts);
   let last = 0;
   effects.push({
