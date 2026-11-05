@@ -11,7 +11,7 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { makeExitButton } from '../../shared/exit.js';
-import { LEVELS, levelSpec } from './levels.js';
+import { LEVELS, levelSpec, GOAL_WEIGHT } from './levels.js';
 
 // ================= 可调参数 =================
 const COLS = 8, ROWS = 9;
@@ -123,7 +123,15 @@ function makeDot(c, r, color, fromRow = r) {
   mesh.userData.dot = d;
   return d;
 }
-const randColor = () => Math.floor(Math.random() * nColors);
+// 闯关时，还没完成的目标颜色掉下来得多一些（保证能过关；离线机器人测试过每一关）
+function randColor() {
+  if (!lv) return Math.floor(Math.random() * nColors);
+  const w = [];
+  for (let i = 0; i < nColors; i++) w.push(goals[i] > 0 ? GOAL_WEIGHT : 1);
+  let t = Math.random() * w.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < nColors; i++) { t -= w[i]; if (t < 0) return i; }
+  return nColors - 1;
+}
 
 function newGame(m = mode, colors = nColors) {
   mode = m;
@@ -162,6 +170,7 @@ function newGame(m = mode, colors = nColors) {
     }
   }
   ensureMove();
+  if (lv) ensureProgress();
   state = 'playing';
   score = 0; combo = 0; lastClear = -99; timeLeft = TIMED_SECONDS;
   cancelChain();
@@ -260,6 +269,7 @@ function finishChain() {
   if (starAt) grid[starAt.c][starAt.r] = makeDot(starAt.c, starAt.r, STAR);
   drop();
   ensureMove();
+  if (lv && !goalsDone()) ensureProgress();
   sfx.perfect(Math.min(3, Math.floor(cells.length / 2)));
   app.pulseAll(0.5 + Math.min(0.5, n * 0.04), 80);
   popup(`+${gained}${combo > 1 ? `  连击×${combo}` : ''}`, cells[cells.length - 1]);
@@ -326,6 +336,68 @@ function hasMove() {
   }
   return false;
 }
+// 闯关保底：盘面上至少要有一条能推进目标的线（目标颜色、冰块上、石头旁边）。
+// 没有的话，就悄悄把目标附近三个点改成同一种颜色（会闪一下），保证每一关都有路可走。
+const NB = (c, r) => [[c + 1, r], [c - 1, r], [c, r + 1], [c, r - 1]].filter(([a, b]) => a >= 0 && b >= 0 && a < COLS && b < ROWS);
+const isStone = (c, r) => grid[c][r]?.color === STONE;
+function progressExists() {
+  for (let col = 0; col < nColors; col++) {
+    const seen = new Set();
+    for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+      const v = grid[c][r].color;
+      if ((v !== col && v !== STAR) || seen.has(c * 100 + r)) continue;
+      const comp = [];
+      const st = [[c, r]];
+      seen.add(c * 100 + r);
+      while (st.length) {
+        const [x, y] = st.pop();
+        comp.push([x, y]);
+        for (const [nx, ny] of NB(x, y)) {
+          const w = grid[nx][ny].color;
+          if ((w === col || w === STAR) && !seen.has(nx * 100 + ny)) { seen.add(nx * 100 + ny); st.push([nx, ny]); }
+        }
+      }
+      if (comp.length < 3) continue;
+      for (const [x, y] of comp) {
+        if (goals[col] > 0 && grid[x][y].color === col) return true;
+        if (goals.ice > 0 && ice[x][y]) return true;
+        if (goals.stone > 0 && NB(x, y).some(([nx, ny]) => isStone(nx, ny))) return true;
+      }
+    }
+  }
+  return false;
+}
+function ensureProgress() {
+  if (progressExists()) return;
+  const targets = [];
+  for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) {
+    if (isStone(c, r)) continue;
+    if ((goals.ice > 0 && ice[c][r]) || (goals.stone > 0 && NB(c, r).some(([x, y]) => isStone(x, y)))) targets.push([c, r]);
+  }
+  const colorGoals = Object.keys(goals).filter((k) => /^\d+$/.test(k) && goals[k] > 0).map(Number);
+  if (!targets.length) for (let c = 0; c < COLS; c++) for (let r = 0; r < ROWS; r++) if (!isStone(c, r)) targets.push([c, r]);
+  const any = (a) => a[Math.floor(Math.random() * a.length)];
+  for (let tries = 0; tries < 30; tries++) {
+    const T = any(targets);
+    const As = NB(...T).filter(([x, y]) => !isStone(x, y));
+    if (!As.length) continue;
+    const A = any(As);
+    const Bs = [...NB(...A), ...NB(...T)].filter(([x, y]) => !isStone(x, y) && !(x === T[0] && y === T[1]) && !(x === A[0] && y === A[1]));
+    if (!Bs.length) continue;
+    const B = any(Bs);
+    const tc = grid[T[0]][T[1]].color;
+    const col = colorGoals.length ? any(colorGoals) : tc >= 0 ? tc : 0;
+    for (const [x, y] of [T, A, B]) {
+      const d = grid[x][y];
+      d.color = col;
+      d.mesh.geometry = dotGeo;
+      d.mesh.material = dotMats[col];
+      bump(d);
+    }
+    return;
+  }
+}
+
 function ensureMove() {
   let guard = 0;
   while (!hasMove() && guard++ < 20) {
