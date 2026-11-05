@@ -18,8 +18,11 @@ const COLS = 8, ROWS = 9;
 const GAP = 0.11;           // 圆点间距（米）：整块大约 0.9 × 1 米
 const DOT_R = 0.036;        // 圆点半径
 const TOUCH = 0.046;        // 手柄尖端离圆点中心多近算碰到
-const ARM = 0.6;            // 面板离你多远（一臂）
-const CHEST = 0.3;          // 胸口比眼睛低多少：面板最底边放在这里
+// 面板离你多远：默认 1 米（试玩反馈：0.6 米太近），面板上可以拉远/拉近，会记住
+const ARM_DEFAULT = 1.0, ARM_MIN = 0.45, ARM_MAX = 1.8, ARM_STEP = 0.15;
+let ARM = THREE.MathUtils.clamp(Number(loadPref('dots-dist', String(ARM_DEFAULT))) || ARM_DEFAULT, ARM_MIN, ARM_MAX);
+// 高度：面板下三分之一处和眼睛平齐（面板中心比眼睛高 1/6 个面板）
+const boardY = (eyeY) => eyeY + BOARD_H / 6;
 const TIP = 0.045;          // 尖端在手柄前方多远
 const COMBO_WINDOW = 3;     // 几秒内接着消算连击
 const TIMED_SECONDS = 60;
@@ -52,7 +55,7 @@ function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_)
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
 const rig = new THREE.Group();   // 原点 = 圆点墙中心
-rig.position.set(0, 1.3 + BOARD_H / 2, -ARM);
+rig.position.set(0, boardY(1.6), -ARM);
 scene.add(rig);
 const board = new THREE.Group();
 rig.add(board);
@@ -530,6 +533,15 @@ const opt1 = mk('', -0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLe
 const opt2 = mk('', 0.145, -0.275, '#2f3f6e', () => (mode === 'levels' ? gotoLevel(levelIdx + 1) : newGame(mode, 6)));
 mk('重新开始 A/X', -0.145, -0.35, '#3a5bd9', () => newGame());
 mk('移到面前 B/Y', 0.145, -0.35, '#3a5bd9', () => placeInFront());
+// 拉近 / 拉远：每次 15 厘米，记住你的设置
+function nudgeDistance(d) {
+  ARM = THREE.MathUtils.clamp(Math.round((ARM + d) * 100) / 100, ARM_MIN, ARM_MAX);
+  savePref('dots-dist', String(ARM));
+  placeInFront();
+  setStatus(`面板距离 ${ARM.toFixed(2)} 米${ARM > 0.75 ? '（手够不着时用射线）' : ''}`);
+}
+mk('◀ 拉近', -0.145, -0.5, '#2e5a46', () => nudgeDistance(-ARM_STEP));
+mk('拉远 ▶', 0.145, -0.5, '#2e5a46', () => nudgeDistance(ARM_STEP));
 const envButton = mk('背景：… ▶', -0.07, -0.425, '#5a4a2e', () => envs.next(), 0.43);
 if (envs.label) envButton.userData.ui.setLabel(`背景：${envs.label} ▶`);
 {
@@ -626,7 +638,7 @@ let placeAfter = -1;
 function placeInFront() {
   const head = app.headPosition(new THREE.Vector3());
   const f = app.headForward(new THREE.Vector3());
-  const y = (app.presenting ? head.y - CHEST : 1.3) + BOARD_H / 2;
+  const y = boardY(app.presenting ? head.y : 1.6);
   rig.position.set(head.x + f.x * ARM, y, head.z + f.z * ARM);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
   sfx.click();
@@ -747,9 +759,9 @@ app.on('select', (c) => {
 app.on('selectend', (c) => { if (chain?.by === c) finishChain(); });
 
 // ================= 电脑上预览：按住鼠标拖过去 =================
-camera.position.set(0, 1.6, 0.75);
+camera.position.set(0, 1.65, 0.35);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.3 + BOARD_H / 2, -ARM);
+controls.target.set(0, boardY(1.6), -ARM);
 controls.enableDamping = true;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
