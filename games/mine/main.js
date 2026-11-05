@@ -1,6 +1,7 @@
-// 深井矿工（样品）：站在 3×3 的矿井正中间，挥镐往下挖。头顶不停掉石块，四周堆满就被埋住。
-// 坐标：rig 放在你脚下（y=0 是真实地板）；world 是整口矿井，往下挖一层，world 就整体往上移一层，
-// 所以你一直站在真实地板上，看起来却是一层一层掉下去。
+// 深井矿工：你站在矿井底部的一小块空地上，四周一圈方块正好在腰的高度，站着挥镐就能挖。
+// 把四周这一圈全部挖空，脚下就塌了，你往下掉一层，新的一圈方块又围上来。
+// 头顶不停掉石块，但不会砸到你：它们落进四周的格子里，把挖开的洞填上、越堆越高，堆太高就被埋住了。
+// 坐标：rig 放在你脚下（y=0 是真实地板）；world 是整口矿井，往下掉一层，world 就整体往上移一层。
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createXRApp } from '../../shared/xr-app.js';
@@ -8,20 +9,24 @@ import { makeCanvasPlane, makeButton, roundRect, FONT } from '../../shared/ui3d.
 import { sfx, initAudio } from '../../shared/sfx.js';
 import { createEnvManager, ENVIRONMENTS, savedEnvKey } from '../../shared/env/index.js';
 import { createFeet } from '../../shared/feet.js';
+import { exitToLobby } from '../../shared/exit.js';
 
 // ================= 可调参数 =================
-const C = 0.6;              // 每格（方块）边长，也是每层的高度（米）
-const MAXH = 3;             // 每个石堆最多堆几块（3 块 = 1.8 米）
-const BURY = 16;            // 四周一共堆了这么多块就算被埋住
-const HEARTS = 3;
-const SPAWN_START = 2.4;    // 一开始每隔几秒掉一块
-const SPAWN_MIN = 0.6;      // 最快每隔几秒掉一块
-const HANG = 0.55;          // 石块在头顶晃一下再掉（提前警告）
-const G = 6.5;              // 石块下落的重力（比真实的小，留出反应时间）
-const SWING = 1.3;          // 镐头速度超过这个（米/秒）才算砸到
-const COOLDOWN = 0.2;       // 同一只手两次敲击的最小间隔（秒）
-const HEAD_R = 0.33;        // 头离中心多近会被正上方的石块砸到
-const SHED = 0.5;           // 往下掉一层时，四周石堆塌掉的比例
+const C = 0.6;              // 每格宽度（米）。矿井是 4×4 格（2.4 米见方），中间 2×2 是你站的空地
+const WAIST = 0.72;         // 方块顶面比眼睛低多少（大约到腰）
+const MAXH = 3;             // 每格最多堆几块（1 块原来的 + 2 块碎石）
+const BURY = 12;            // 四周高出腰部的碎石一共这么多块就算被埋住
+const SPAWN_START = 2.6;    // 一开始每隔几秒掉一块
+const SPAWN_MIN = 0.7;      // 最快每隔几秒掉一块
+const HANG = 0.5;           // 石块在上面晃一下再掉（提前警告）
+const G = 6.5;              // 石块下落的重力
+const SWING = 1.2;          // 镐头速度超过这个（米/秒）才算砸到
+const COOLDOWN = 0.18;      // 同一只手两次敲击的最小间隔（秒）
+const RING = [];            // 四周一圈 12 个格子的编号（4×4 里去掉中间 2×2）
+for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) if (!(i >= 1 && i <= 2 && j >= 1 && j <= 2)) RING.push(j * 4 + i);
+const colX = (k) => ((k % 4) - 1.5) * C;
+const colZ = (k) => (Math.floor(k / 4) - 1.5) * C;
+let H = 0.88;               // 每层高度 = 方块高度（进入 VR 时按你的身高调到腰部）
 
 // ================= 场景 =================
 const app = createXRApp({ onFrame });
@@ -29,20 +34,20 @@ const { scene, camera, renderer } = app;
 
 const rig = new THREE.Group();     // 放在你脚下、朝你面对的方向
 scene.add(rig);
-const world = new THREE.Group();   // 整口矿井 + 地面背景，挖下去时往上移
+const world = new THREE.Group();   // 整口矿井 + 地面背景，往下掉时往上移
 rig.add(world);
 const envHolder = new THREE.Group();
-envHolder.position.y = -0.02;      // 背景的地面比方块顶面低一点点，不打架
 world.add(envHolder);
-const hud = new THREE.Group();     // 面板：固定在你面前的井壁上
+const hud = new THREE.Group();     // 面板：固定在你面前
 rig.add(hud);
 
 const envs = createEnvManager(scene, {
   onChange: (def) => {
-    envButton?.userData.ui.setLabel(`背景：${def.label} ▶`);
     if (envSelect) envSelect.value = def.key;
     const env = envs.current;
-    if (env) { envHolder.add(env.group); clearShaft(env.group); }
+    if (env) { envHolder.add(env.group); clearShaft(env.group); cutHole(env.group); }
+    menuEnvButton?.userData.ui.setLabel(`背景：${def.label} ▶`);
+    if (state === 'playing') say(`背景换成了${def.label}`);
   },
 });
 envs.set(savedEnvKey());
@@ -55,9 +60,37 @@ function clearShaft(group) {
     for (let i = 0; i < o.count; i++) {
       o.getMatrixAt(i, m);
       p.setFromMatrixPosition(m);
-      if (Math.abs(p.x) < 2.2 && Math.abs(p.z) < 2.2) o.setMatrixAt(i, zero);
+      if (Math.abs(p.x) < 2.6 && Math.abs(p.z) < 2.6) o.setMatrixAt(i, zero);
     }
     o.instanceMatrix.needsUpdate = true;
+  });
+}
+
+// 在背景的地面（还有水面、街道）上挖一个和矿井一样大的方洞：
+// 给背景的每个材质加一小段着色器代码，落在矿井这根方柱里、地面附近的像素直接丢掉
+const holeUniforms = { uShaftInv: { value: new THREE.Matrix4() }, uHalf: { value: 2 * 0.6 }, uTop: { value: 1.3 } };
+function cutHole(group) {
+  group.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (m.userData.shaftHole) continue;
+      m.userData.shaftHole = true;
+      const prev = m.onBeforeCompile;
+      const prevKey = m.customProgramCacheKey?.bind(m);
+      m.onBeforeCompile = (shader, r) => {
+        prev?.call(m, shader, r);
+        Object.assign(shader.uniforms, holeUniforms);
+        const decl = 'varying vec3 vShaftL;\nuniform mat4 uShaftInv;\nuniform float uHalf, uTop;\n';
+        const vs = shader.vertexShader;
+        const end = vs.lastIndexOf('}');
+        shader.vertexShader = decl + vs.slice(0, end) +
+          '\n  { vec4 sv = inverse(projectionMatrix) * gl_Position; sv /= sv.w; vShaftL = (uShaftInv * (inverse(viewMatrix) * sv)).xyz; }\n' + vs.slice(end);
+        shader.fragmentShader = decl + shader.fragmentShader.replace(/void\s+main\s*\(\s*\)\s*\{/,
+          'void main() {\n  if (abs(vShaftL.x) < uHalf && abs(vShaftL.z) < uHalf && vShaftL.y < uTop) discard;\n');
+      };
+      m.customProgramCacheKey = () => (prevKey ? prevKey() : '') + '|shafthole';
+      m.needsUpdate = true;
+    }
   });
 }
 
@@ -75,7 +108,7 @@ function loadPref(k, d) { try { return localStorage.getItem(k) ?? d; } catch (_)
 function savePref(k, v) { try { localStorage.setItem(k, v); } catch (_) { /* 无痕模式 */ } }
 
 // 头灯 + 一点环境光（井底很暗）
-const headLamp = new THREE.PointLight('#fff1d6', 2.2, 5, 1.2);
+const headLamp = new THREE.PointLight('#fff1d6', 2.2, 6, 1.2);
 camera.add(headLamp);
 const caveLight = new THREE.HemisphereLight('#c9d6ff', '#3a2a1c', 0.5);
 scene.add(caveLight);
@@ -150,160 +183,161 @@ const crackTex = [1, 2, 3].map((stage) => canvasTex(128, 128, (g, w, h) => {
   }
 }));
 
-// 方块种类：hp = 要敲几下；pts = 塌掉时得几分
+// 方块种类：hp = 要敲几下；pts = 挖掉时得几分
 const TYPES = {
-  dirt: { hp: 2, pts: 0, name: '泥土' },
-  stone: { hp: 3, pts: 0, name: '石头' },
-  hard: { hp: 5, pts: 0, name: '硬岩' },
-  gem: { hp: 3, pts: 5, name: '宝石' },
-  gold: { hp: 3, pts: 3, name: '金矿' },
+  dirt: { hp: 1, pts: 0, name: '泥土' },
+  stone: { hp: 2, pts: 0, name: '石头' },
+  hard: { hp: 3, pts: 0, name: '硬岩' },
+  gem: { hp: 2, pts: 5, name: '宝石' },
+  gold: { hp: 2, pts: 3, name: '金矿' },
   tnt: { hp: 1, pts: 0, name: '炸药' },
+  rubble: { hp: 1, pts: 0, name: '碎石' },
 };
 const MAT = {};
-for (const k of [...Object.keys(TYPES), 'rubble']) {
+for (const k of Object.keys(TYPES)) {
   MAT[k] = new THREE.MeshStandardMaterial({ map: TEX[k], roughness: 0.9, metalness: k === 'gold' ? 0.2 : 0 });
   if (k === 'gem' || k === 'gold') { MAT[k].emissive = new THREE.Color(k === 'gem' ? '#0a5160' : '#5a3b00'); MAT[k].emissiveIntensity = 0.6; }
 }
 
 // 深度分区：越往下颜色越深、越硬
 const ZONES = [
-  { from: 0, name: '表土层', wall: '#ffffff', fog: '#2a2018' },
-  { from: 8, name: '岩石层', wall: '#b9bcc4', fog: '#1c1e24' },
-  { from: 20, name: '深岩层', wall: '#7f8aa8', fog: '#11131c' },
-  { from: 35, name: '熔岩层', wall: '#ff9a7a', fog: '#2a0d06' },
+  { from: 0, name: '表土层', wall: '#ffffff' },
+  { from: 6, name: '岩石层', wall: '#b9bcc4' },
+  { from: 15, name: '深岩层', wall: '#7f8aa8' },
+  { from: 28, name: '熔岩层', wall: '#ff9a7a' },
 ];
 const zoneOf = (d) => [...ZONES].reverse().find((z) => d >= z.from);
 
-function pickType(d, k) {
+function pickType(d) {
   const r = Math.random();
-  if (d >= 3 && k === 4 && r < 0.06) return 'tnt';
-  const ore = Math.random();
-  if (ore < 0.07 + Math.min(0.06, d * 0.002)) return d > 10 && Math.random() < 0.55 ? 'gem' : 'gold';
-  if (d < 6) return r < 0.8 ? 'dirt' : 'stone';
-  if (d < 18) return r < 0.3 ? 'dirt' : r < 0.9 ? 'stone' : 'hard';
-  if (d < 35) return r < 0.6 ? 'stone' : 'hard';
-  return r < 0.35 ? 'stone' : 'hard';
+  if (d >= 2 && r < 0.04) return 'tnt';
+  if (Math.random() < 0.08 + Math.min(0.06, d * 0.003)) return d > 6 && Math.random() < 0.55 ? 'gem' : 'gold';
+  if (d < 4) return r < 0.75 ? 'dirt' : 'stone';
+  if (d < 12) return r < 0.35 ? 'dirt' : r < 0.9 ? 'stone' : 'hard';
+  if (d < 25) return r < 0.55 ? 'stone' : 'hard';
+  return r < 0.3 ? 'stone' : 'hard';
 }
 
 // ================= 矿井 =================
 const shaft = new THREE.Group();
 world.add(shaft);
-const colX = (k) => ((k % 3) - 1) * C;
-const colZ = (k) => (Math.floor(k / 3) - 1) * C;
-const blockGeo = new THREE.BoxGeometry(C, C, C);
-const rubbleGeo = new THREE.BoxGeometry(C * 0.96, C * 0.96, C * 0.96);
+const unitGeo = new THREE.BoxGeometry(C * 0.98, 1, C * 0.98); // 高度按 H 缩放
 
 // 井壁：四面朝里的长条，从地面一直往下
 const WALL_LEN = 400;
 const wallMat = new THREE.MeshStandardMaterial({ map: TEX.wall, roughness: 0.95 });
-TEX.wall.repeat.set(3, WALL_LEN / C);
+TEX.wall.repeat.set(4, WALL_LEN / C);
 // 左右两面墙往你身后多延伸 3 米：VR 里被后墙挡住看不见，电脑预览从背后看时不会露出天空
 const wallMatSide = wallMat.clone();
 wallMatSide.map = TEX.wall.clone();
-wallMatSide.map.repeat.set((3 * C + 3) / C, WALL_LEN / C);
+wallMatSide.map.repeat.set((4 * C + 3) / C, WALL_LEN / C);
+const walls = new THREE.Group();
+shaft.add(walls);
 for (let s = 0; s < 4; s++) {
   const side = s % 2 === 1;
-  const m = new THREE.Mesh(new THREE.PlaneGeometry(side ? 3 * C + 3 : 3 * C, WALL_LEN), side ? wallMatSide : wallMat);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(side ? 4 * C + 3 : 4 * C, WALL_LEN), side ? wallMatSide : wallMat);
   const a = s * Math.PI / 2;
-  m.position.set(-Math.sin(a) * 1.5 * C, -WALL_LEN / 2, side ? 1.5 : -Math.cos(a) * 1.5 * C);
+  m.position.set(-Math.sin(a) * 2 * C, -WALL_LEN / 2, side ? 1.5 : -Math.cos(a) * 2 * C);
   m.rotation.y = a;
-  shaft.add(m);
+  walls.add(m);
 }
 // 井口一圈木框
+const rim = new THREE.Group();
+shaft.add(rim);
 {
   const wood = new THREE.MeshStandardMaterial({ color: '#7a5230', roughness: 0.8 });
   for (let s = 0; s < 4; s++) {
-    const beam = new THREE.Mesh(new THREE.BoxGeometry(3 * C + 0.3, 0.12, 0.15), wood);
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(4 * C + 0.3, 0.12, 0.15), wood);
     const a = s * Math.PI / 2;
-    beam.position.set(-Math.sin(a) * (1.5 * C + 0.075), 0.04, -Math.cos(a) * (1.5 * C + 0.075));
+    beam.position.set(-Math.sin(a) * (2 * C + 0.075), 0.04, -Math.cos(a) * (2 * C + 0.075));
     beam.rotation.y = a;
-    shaft.add(beam);
+    rim.add(beam);
   }
 }
 
-let depth = 0;          // 你站在第几层的顶上
-let depthVis = 0;       // 动画用（平滑）
-const layers = new Map(); // d → { types[9], meshes[9] }
-const piles = Array.from({ length: 9 }, () => []); // 四周 8 个石堆（中间 4 号不用）
-let centreHP = 0;
-const crack = new THREE.Mesh(new THREE.PlaneGeometry(C * 0.98, C * 0.98), new THREE.MeshBasicMaterial({ map: crackTex[0], transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }));
-crack.rotation.x = -Math.PI / 2;
-crack.visible = false;
-shaft.add(crack);
+let depth = 0;          // 你在第几层（脚在 -depth*H）
+let depthVis = 0;       // 动画用
+const cols = Array.from({ length: 16 }, () => []); // 四周每格一摞方块，下面是原来的、上面是碎石
+let below = [];         // 脚下一层（16 块），挖开的洞底下看得到
+const feetY = () => -depth * H;
+const unitY = (j) => feetY() + (j + 0.5) * H;
+const ringLeft = () => RING.filter((k) => cols[k].length > 0).length;
+const buryCount = () => RING.reduce((s, k) => s + Math.max(0, cols[k].length - 1), 0);
 
-function makeLayer(d) {
-  if (layers.has(d)) return layers.get(d);
-  const types = [], meshes = [];
-  for (let k = 0; k < 9; k++) {
-    const t = pickType(d, k);
-    const m = new THREE.Mesh(blockGeo, MAT[t]);
-    m.position.set(colX(k), -d * C - C / 2, colZ(k));
-    m.userData = { layer: d, k };
+function makeUnit(type, k, j) {
+  const m = new THREE.Mesh(unitGeo, MAT[type]);
+  m.scale.y = H * 0.98;
+  m.position.set(colX(k), unitY(j), colZ(k));
+  if (type === 'rubble') m.rotation.y = (Math.random() - 0.5) * 0.25;
+  m.userData = { k, unit: true };
+  shaft.add(m);
+  return { type, hp: TYPES[type].hp, mesh: m, ty: unitY(j) };
+}
+// 脚下一层：只是看的（挖开的洞底下、中间空地的地面）
+function buildBelow() {
+  below.forEach((u) => shaft.remove(u.mesh));
+  below = [];
+  for (let k = 0; k < 16; k++) {
+    const t = pickType(depth + 1);
+    const m = new THREE.Mesh(unitGeo, MAT[RING.includes(k) ? t : 'dirt']);
+    m.scale.y = H * 0.98;
+    m.position.set(colX(k), feetY() - H / 2, colZ(k));
     shaft.add(m);
-    types.push(t); meshes.push(m);
+    below.push({ type: t, mesh: m });
   }
-  const L = { types, meshes };
-  layers.set(d, L);
-  return L;
 }
-function ensureLayers() {
-  for (const [d, L] of layers) if (d < depth) { L.meshes.forEach((m) => shaft.remove(m)); layers.delete(d); }
-  for (let d = depth; d <= depth + 2; d++) makeLayer(d);
+function fillRing(types) {
+  for (const k of RING) cols[k].push(makeUnit(types ? types[k] : pickType(depth), k, 0));
 }
-const centreType = () => layers.get(depth).types[4];
-const centreMesh = () => layers.get(depth).meshes[4];
-
-const floorTop = () => -depth * C;
-const pileCount = () => piles.reduce((s, p) => s + p.length, 0);
-
-function placePileBlock(k, m, j) {
-  m.userData.ty = floorTop() + j * C + C / 2;
-  m.userData.k = k;
-  m.userData.pile = true;
+function layoutWorld() {
+  envHolder.position.y = H - 0.02;  // 地面在最上面一层方块的顶上
+  walls.position.y = H;
+  rim.position.y = H;
 }
 
 // ================= 游戏状态 =================
-let state = 'idle';    // idle | playing | over
-let hearts = HEARTS;
+let state = 'idle';    // idle | intro | playing | over
 let ore = 0, smashed = 0, elapsed = 0, spawnTimer = 3;
 let best = Number(loadPref('mine-best', '0')) || 0;
-let overReason = '';
 let message = '', messageT = 0;
 const rocks = [];      // 正在掉的石块
 const effects = [];    // 碎屑、飘字
 let fallAnim = null;
+let menuOpen = false;
+let introSeen = false;
 const score = () => depth * 10 + ore + smashed * 2;
 
 function clearAll() {
-  for (const [, L] of layers) L.meshes.forEach((m) => shaft.remove(m));
-  layers.clear();
-  for (const p of piles) { p.forEach((m) => shaft.remove(m)); p.length = 0; }
-  for (const r of rocks) { shaft.remove(r.mesh, r.warn); }
+  for (const col of cols) { col.forEach((u) => shaft.remove(u.mesh)); col.length = 0; }
+  for (const r of rocks) shaft.remove(r.mesh, r.warn);
   rocks.length = 0;
 }
 function newGame() {
   clearAll();
   depth = 0; depthVis = 0;
-  hearts = HEARTS; ore = 0; smashed = 0; elapsed = 0; spawnTimer = 3;
-  overReason = '';
+  ore = 0; smashed = 0; elapsed = 0; spawnTimer = 4;
   fallAnim = null;
-  ensureLayers();
-  resetCentre();
-  state = 'playing';
-  say('挥镐砸脚下正中间那块！');
+  layoutWorld();
+  fillRing();
+  buildBelow();
+  setMenu(false);
+  flash.material.opacity = 0;
+  if (!introSeen && (app.presenting || desktopPreview)) { state = 'intro'; intro.mesh.visible = true; }
+  else { state = 'playing'; say('把四周这一圈方块全部挖掉！'); }
   drawHud();
 }
-function resetCentre() {
-  centreHP = TYPES[centreType()].hp;
-  crack.visible = false;
-  crack.position.set(0, floorTop() + 0.004, 0);
+function startPlaying() {
+  introSeen = true;
+  intro.mesh.visible = false;
+  state = 'playing';
+  say('把四周这一圈方块全部挖掉！');
+  sfx.click();
 }
 function say(t, s = 2.5) { message = t; messageT = s; drawHud(); }
 
-function gameOver(reason) {
+function gameOver() {
   if (state !== 'playing') return;
   state = 'over';
-  overReason = reason;
   for (const r of rocks) { chips(r.mesh.position.clone(), MAT.rubble, 4); shaft.remove(r.mesh, r.warn); }
   rocks.length = 0;
   const s = score();
@@ -311,88 +345,97 @@ function gameOver(reason) {
   if (isBest) { best = s; savePref('mine-best', String(best)); }
   sfx.boom();
   app.pulseAll(1, 300);
-  flash.material.color.set(reason === 'buried' ? '#2a1a0e' : '#7a0a0a');
-  flash.material.opacity = 0.85;
-  say(isBest ? '新纪录！' : '按 A / X 或点“重新开始”', 999);
+  flash.material.color.set('#2a1a0e');
+  flash.material.opacity = 0.8;
+  say(isBest ? `新纪录 ${s} 分！按 A/X 再来` : `得分 ${s}，按 A/X 再来`, 999);
 }
 
 // ================= 敲击 =================
-function hitCentre(power = 1, c = null) {
-  if (state !== 'playing' || fallAnim) return;
-  const t = centreType();
-  centreHP -= power;
-  const hardIdx = { dirt: 0, stone: 1, hard: 2, gem: 1, gold: 1, tnt: 0 }[t];
-  sfx.pick(hardIdx);
-  if (c) app.pulse(c, 0.5 + hardIdx * 0.15, 40);
-  chips(new THREE.Vector3(0, floorTop() + 0.02, 0), MAT[t], 6);
-  if (centreHP <= 0) { breakLayer(c); return; }
-  const frac = 1 - centreHP / TYPES[t].hp;
-  crack.visible = true;
-  crack.material.map = crackTex[Math.min(2, Math.floor(frac * 3))];
-  crack.material.needsUpdate = true;
+const HARD = { dirt: 0, stone: 1, hard: 2, gem: 1, gold: 1, tnt: 0, rubble: 0 };
+function hitColumn(k, c = null) {
+  const col = cols[k];
+  if (!col.length || state !== 'playing' || fallAnim || menuOpen) return;
+  const u = col[col.length - 1];
+  u.hp--;
+  sfx.pick(HARD[u.type]);
+  if (c) app.pulse(c, 0.45 + HARD[u.type] * 0.15, 40);
+  chips(u.mesh.position.clone().setY(u.ty + H / 2), MAT[u.type], 5);
+  if (u.hp > 0) {
+    // 还没碎：裂开、晃一下
+    u.mesh.material = crackedMat(u.type, 1 - u.hp / TYPES[u.type].hp);
+    u.mesh.position.x = colX(k) + 0.02;
+    return;
+  }
+  col.pop();
+  shaft.remove(u.mesh);
+  sfx.smash();
+  if (c) app.pulse(c, 0.8, 70);
+  if (u.type === 'rubble') smashed++;
+  if (TYPES[u.type].pts) {
+    ore += TYPES[u.type].pts;
+    sfx.bonus();
+    popup(`+${TYPES[u.type].pts} ${TYPES[u.type].name}`, u.mesh.position.clone().setY(u.ty + H * 0.8), '#ffd166');
+  }
+  if (u.type === 'tnt') { explode(); return; }
+  if (ringLeft() === 0) dropLayer(1);
+  else drawHud();
+}
+// 裂纹：给方块换一份带裂纹的材质
+const crackCache = new Map();
+function crackedMat(type, frac) {
+  const stage = Math.min(2, Math.floor(frac * 3));
+  const key = type + stage;
+  if (!crackCache.has(key)) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d');
+    g.drawImage(TEX[type].image, 0, 0);
+    g.drawImage(crackTex[stage].image, 0, 0);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    const m = MAT[type].clone();
+    m.map = t;
+    crackCache.set(key, m);
+  }
+  return crackCache.get(key);
+}
+function explode() {
+  for (const k of RING) {
+    for (const u of cols[k]) {
+      chips(u.mesh.position.clone(), MAT[u.type], 3);
+      if (TYPES[u.type].pts) ore += TYPES[u.type].pts;
+      shaft.remove(u.mesh);
+    }
+    cols[k].length = 0;
+  }
+  sfx.boom();
+  app.pulseAll(1, 250);
+  flash.material.color.set('#ffb347');
+  flash.material.opacity = 0.6;
+  dropLayer(1);
+  say('轰！整圈都炸开了');
 }
 
-function breakLayer(c) {
-  const L = layers.get(depth);
-  const isTnt = L.types[4] === 'tnt';
-  let gained = 0, gems = 0;
-  L.types.forEach((t, k) => {
-    gained += TYPES[t].pts;
-    if (TYPES[t].pts) gems++;
-    chips(L.meshes[k].position.clone().setY(floorTop() - 0.1), MAT[t], 5);
-  });
-  // 四周石堆塌掉一部分（炸药：全部炸飞）
-  for (let k = 0; k < 9; k++) {
-    const p = piles[k];
-    const shed = isTnt ? p.length : Math.ceil(p.length * SHED - 0.01);
-    for (let n = 0; n < shed; n++) {
-      const m = p.shift();
-      chips(m.position.clone(), MAT.rubble, 3);
-      shaft.remove(m);
-    }
-  }
-  let drop = 1;
-  if (isTnt) {
-    drop = 2;
-    const L2 = makeLayer(depth + 1);
-    L2.types.forEach((t) => { gained += TYPES[t].pts; if (TYPES[t].pts) gems++; });
-    sfx.boom();
-    app.pulseAll(1, 250);
-    flash.material.color.set('#ffb347');
-    flash.material.opacity = 0.6;
-    say('轰！炸开两层，石堆全飞了');
-  } else {
-    sfx.crumble();
-    if (c) app.pulse(c, 1, 120);
-  }
-  if (gained) {
-    ore += gained;
-    sfx.bonus();
-    popup(`+${gained} ${gems > 1 ? '矿石 ×' + gems : '矿石'}`, new THREE.Vector3(0, floorTop() + 1.1, -0.45), '#ffd166');
-  }
-  depth += drop;
-  ensureLayers();
-  resetCentre();
-  // 剩下的石堆跟着一起掉
-  piles.forEach((p, k) => p.forEach((m, j) => placePileBlock(k, m, j)));
-  for (const r of rocks) r.mesh.position.y -= drop * C; // 空中的石块也跟着一起往下
-  fallAnim = { from: depthVis, to: depth, t: 0, dur: 0.28 + 0.08 * drop };
+// 四周挖空了：脚下塌了，往下掉一层，新的一圈方块围上来
+function dropLayer(n) {
+  for (const k of [5, 6, 9, 10]) chips(below[k].mesh.position.clone().setY(feetY()), MAT.dirt, 4);
+  const types = {};
+  for (const k of RING) types[k] = below[k].type;
+  below.forEach((u) => shaft.remove(u.mesh));
+  below = [];
+  depth += n;
+  fillRing(types);
+  // 新的一圈从下面“冒出来”：先放在原位，跟着 world 一起往上移
+  buildBelow();
+  for (const r of rocks) r.mesh.position.y -= n * H; // 空中的石块也跟着一起往下
+  fallAnim = { from: depthVis, to: depth, t: 0, dur: 0.3 };
+  sfx.crumble();
   sfx.whoosh();
+  app.pulseAll(0.8, 120);
   if (comfort) vignette.material.opacity = 0.9;
   const z = zoneOf(depth);
-  if (zoneOf(depth - drop) !== z) say(`进入${z.name}！石头更硬了`);
-  drawHud();
-}
-
-function hitPile(k, c = null) {
-  const p = piles[k];
-  if (!p.length || state !== 'playing') return;
-  const m = p.pop();
-  chips(m.position.clone(), MAT.rubble, 6);
-  shaft.remove(m);
-  sfx.smash();
-  if (c) app.pulse(c, 0.6, 50);
-  drawHud();
+  if (zoneOf(depth - n) !== z) say(`进入${z.name}！石头更硬了`);
+  else say(`往下 ${(depth * 0.6).toFixed(1)} 米，继续挖！`, 1.5);
 }
 
 function hitRock(r, c = null) {
@@ -409,33 +452,30 @@ function hitRock(r, c = null) {
   drawHud();
 }
 
-// ================= 掉石块 =================
-const rockGeo = new THREE.DodecahedronGeometry(C * 0.42, 0);
-const warnGeo = new THREE.RingGeometry(C * 0.3, C * 0.42, 32);
+// ================= 掉石块（只落在四周，不会砸到你）=================
+const rockGeo = new THREE.DodecahedronGeometry(C * 0.4, 0);
+const warnGeo = new THREE.RingGeometry(C * 0.28, C * 0.4, 32);
 function spawnRock() {
-  let k;
-  const open = [0, 1, 2, 3, 5, 6, 7, 8].filter((n) => piles[n].length < MAXH);
-  if (!open.length || Math.random() < 0.22) k = 4;
-  else k = open[Math.floor(Math.random() * open.length)];
+  const open = RING.filter((k) => cols[k].length < MAXH && !rocks.some((r) => r.k === k));
+  if (!open.length) return null;
+  const k = open[Math.floor(Math.random() * open.length)];
   const mesh = new THREE.Mesh(rockGeo, MAT.rubble);
   mesh.rotation.set(Math.random() * 3, Math.random() * 3, 0);
-  const warn = new THREE.Mesh(warnGeo, new THREE.MeshBasicMaterial({ color: k === 4 ? '#ff3b3b' : '#ff9f43', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }));
+  const warn = new THREE.Mesh(warnGeo, new THREE.MeshBasicMaterial({ color: '#ff9f43', transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }));
   warn.rotation.x = -Math.PI / 2;
   warn.renderOrder = 3;
-  const y = floorTop() + 4.2;
-  mesh.position.set(colX(k), y, colZ(k));
+  mesh.position.set(colX(k), feetY() + MAXH * H + 2.2, colZ(k));
   shaft.add(mesh, warn);
-  const r = { mesh, warn, k, vy: 0, hang: HANG, passedHead: false };
+  const r = { mesh, warn, k, vy: 0, hang: HANG };
   rocks.push(r);
-  if (k === 4) sfx.warn();
   return r;
 }
 
-function updateRocks(dt, headL) {
+function updateRocks(dt) {
   for (let n = rocks.length - 1; n >= 0; n--) {
     const r = rocks[n];
     const k = r.k;
-    const landY = k === 4 ? floorTop() : floorTop() + piles[k].length * C;
+    const landY = feetY() + cols[k].length * H;
     r.warn.position.set(colX(k), landY + 0.012, colZ(k));
     r.warn.material.opacity = 0.5 + 0.45 * Math.sin(performance.now() / 70);
     if (r.hang > 0) {
@@ -447,48 +487,16 @@ function updateRocks(dt, headL) {
     r.vy -= G * dt;
     r.mesh.position.y += r.vy * dt;
     r.mesh.rotation.x += dt * 3;
-    const bottom = r.mesh.position.y - C * 0.4;
-    // 正上方的石块：砸到头就扣心，歪头躲开就落到地上碎掉
-    if (k === 4 && !r.passedHead && bottom <= headL.y + 0.08) {
-      r.passedHead = true;
-      if (Math.hypot(headL.x, headL.z) < HEAD_R) {
-        rocks.splice(n, 1);
-        shaft.remove(r.mesh, r.warn);
-        chips(r.mesh.position.clone(), MAT.rubble, 8);
-        hearts--;
-        sfx.thud(); sfx.fall();
-        app.pulseAll(1, 200);
-        flash.material.color.set('#c01818');
-        flash.material.opacity = 0.65;
-        if (hearts <= 0) gameOver('hit');
-        else say(`被砸中了！还剩 ${hearts} 颗心`);
-        drawHud();
-        continue;
-      }
-      say('躲开了！');
-    }
-    if (bottom <= landY) {
+    if (r.mesh.position.y - C * 0.38 <= landY) {
       rocks.splice(n, 1);
-      shaft.remove(r.warn);
-      if (k === 4) {
-        shaft.remove(r.mesh);
-        chips(r.mesh.position.clone(), MAT.rubble, 6);
-        sfx.smash();
-        continue;
-      }
-      // 落在石堆上：变成一块方方正正的碎石
-      shaft.remove(r.mesh);
-      if (piles[k].length >= MAXH) continue;
-      const b = new THREE.Mesh(rubbleGeo, MAT.rubble);
-      b.position.set(colX(k), landY + C / 2, colZ(k));
-      b.rotation.y = (Math.random() - 0.5) * 0.3;
-      placePileBlock(k, b, piles[k].length);
-      piles[k].push(b);
-      shaft.add(b);
+      shaft.remove(r.warn, r.mesh);
+      if (cols[k].length >= MAXH) continue;
+      // 落进格子：洞被填上，或者在方块上面再堆一层
+      cols[k].push(makeUnit('rubble', k, cols[k].length));
       sfx.thud();
       app.pulseAll(0.25, 40);
-      if (pileCount() >= BURY) gameOver('buried');
-      else if (pileCount() >= BURY - 4) say('快被埋住了！砸掉石堆或者往下挖');
+      if (buryCount() >= BURY) { gameOver(); return; }
+      else if (buryCount() >= BURY - 3) say('快被埋住了！先砸掉高出来的碎石');
       drawHud();
     }
   }
@@ -535,7 +543,7 @@ function makePickaxe() {
   const head = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.12, 0.05), iron);
   head.position.set(0, 0, -0.4);
   const pick = new THREE.Mesh(new THREE.ConeGeometry(0.024, 0.16, 8), iron);
-  pick.rotation.x = Math.PI; // 尖朝下
+  pick.rotation.x = Math.PI;
   pick.position.set(0, -0.13, -0.4);
   const back = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.08, 8), iron);
   back.position.set(0, 0.09, -0.4);
@@ -554,8 +562,11 @@ for (const c of app.controllers) {
 }
 
 const tmpV = new THREE.Vector3(), tmpHead = new THREE.Vector3();
-function insideBox(p, cx, cy, cz, half) {
-  return Math.abs(p.x - cx) < half && Math.abs(p.y - cy) < half && Math.abs(p.z - cz) < half;
+// 镐尖是不是在某一格那一摞方块里面
+function inColumn(p, k, pad = 0.05) {
+  const n = cols[k].length;
+  if (!n) return false;
+  return Math.abs(p.x - colX(k)) < C / 2 + pad && Math.abs(p.z - colZ(k)) < C / 2 + pad && p.y > feetY() - pad && p.y < feetY() + n * H + pad;
 }
 function updatePicks(dt) {
   for (const c of app.controllers) {
@@ -566,101 +577,122 @@ function updatePicks(dt) {
     const tipL = shaft.worldToLocal(c.grip.localToWorld(c.tip.copy(TIP)));
     const prev = c.prevTip;
     c.prevTip = tipL.clone();
-    if (!prev || c.cool > 0 || state !== 'playing') continue;
+    if (!prev || c.cool > 0 || state !== 'playing' || menuOpen) continue;
     const speed = tipL.distanceTo(prev) / Math.max(dt, 1e-3);
     if (speed < SWING) continue;
     const hit = () => { c.cool = COOLDOWN; glow.material.opacity = 1; };
-    // 1) 空中的石块
-    const r = rocks.find((rk) => rk.mesh.position.distanceTo(tipL) < C * 0.55);
+    const r = rocks.find((rk) => rk.mesh.position.distanceTo(tipL) < C * 0.5);
     if (r) { hitRock(r, c); hit(); continue; }
-    // 2) 四周石堆最上面那块
-    let done = false;
-    for (let k = 0; k < 9 && !done; k++) {
-      const p = piles[k];
-      if (k === 4 || !p.length) continue;
-      const top = p[p.length - 1];
-      const y = top.userData.ty;
-      if (insideBox(tipL, colX(k), y, colZ(k), C / 2 + 0.05) && !insideBox(prev, colX(k), y, colZ(k), C / 2 + 0.05)) {
-        hitPile(k, c); hit(); done = true;
-      }
-    }
-    if (done) continue;
-    // 3) 脚下正中间那块：镐尖从上往下穿过它的顶面
-    const top = floorTop() + 0.12;
-    const half = C / 2 + 0.1;
-    if (Math.abs(tipL.x) < half && Math.abs(tipL.z) < half && tipL.y < top && prev.y >= top && (prev.y - tipL.y) / dt > SWING * 0.7) {
-      hitCentre(1, c); hit();
-    }
+    // 镐尖从外面砸进一格（顶上或侧面都算）
+    const k = RING.find((n) => inColumn(tipL, n) && !inColumn(prev, n));
+    if (k !== undefined) { hitColumn(k, c); hit(); }
   }
 }
 
-// ================= 面板 =================
-const panel = makeCanvasPlane(0.92, 0.36, 900);
-panel.mesh.position.set(0, 2.3, -0.7);
-panel.mesh.rotation.x = 0.5; // 抬头看：石堆堆满也挡不住
+// ================= 面板（永远看得到：不会被石堆挡住）=================
+const panel = makeCanvasPlane(0.8, 0.3, 1000);
+panel.mesh.material.depthTest = false;
+panel.mesh.renderOrder = 900;
+panel.mesh.userData.ui = { onClick: () => setMenu(!menuOpen), setHover() {} };
 hud.add(panel.mesh);
-const restartButton = makeButton('重新开始', { width: 0.34, height: 0.085, color: '#2f8f5b', onClick: () => newGame() });
-restartButton.position.set(-0.2, 2.56, -0.62);
-restartButton.rotation.x = 0.5;
-const envButton = makeButton('背景', { width: 0.38, height: 0.085, color: '#3a5bd9', onClick: () => envs.next() });
-envButton.position.set(0.2, 2.56, -0.62);
-envButton.rotation.x = 0.5;
-envButton.userData.ui.setLabel(`背景：${envs.label || '…'} ▶`);
-hud.add(restartButton, envButton);
-const uiButtons = [restartButton, envButton];
+// 菜单（按 B/Y 或用射线点面板打开）：继续 / 重新开始 / 换背景 / 对准脚下 / 退出
+const menu = new THREE.Group();
+menu.visible = false;
+hud.add(menu);
+const menuButtons = [];
+const mb = (label, y, color, onClick) => {
+  const b = makeButton(label, { width: 0.5, height: 0.09, color, onClick });
+  b.material.depthTest = false;
+  b.renderOrder = 950;
+  b.position.set(0, y, 0);
+  menu.add(b);
+  menuButtons.push(b);
+  return b;
+};
+mb('继续', 0.2, '#2f8f5b', () => setMenu(false));
+mb('重新开始  A/X', 0.09, '#3a5bd9', () => newGame());
+const menuEnvButton = mb(`背景：${envs.label || '…'} ▶`, -0.02, '#5a4a2e', () => envs.next());
+mb('对准脚下', -0.13, '#2e5a46', () => { place(false); setMenu(false); say('矿井已经对准你脚下'); });
+mb('✕ 退出', -0.24, '#b8323a', () => exitToLobby(app));
+function setMenu(v) {
+  menuOpen = v;
+  menu.visible = v;
+  drawHud();
+}
+const uiTargets = () => (menuOpen ? [...menuButtons, panel.mesh] : intro.mesh.visible ? [intro.mesh] : [panel.mesh]);
+
+// 开局说明
+const intro = makeCanvasPlane(0.9, 0.62, 1000);
+intro.mesh.material.depthTest = false;
+intro.mesh.renderOrder = 960;
+intro.mesh.visible = false;
+intro.mesh.userData.ui = { onClick: () => startPlaying(), setHover() {} };
+hud.add(intro.mesh);
+intro.redraw((g, w, h) => {
+  roundRect(g, 6, 6, w - 12, h - 12, 44);
+  g.fillStyle = 'rgba(16,20,34,0.95)'; g.fill();
+  g.lineWidth = 6; g.strokeStyle = '#f5b941'; g.stroke();
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+  g.fillStyle = '#ffd166'; g.font = `800 64px ${FONT}`;
+  g.fillText('怎么玩', 50, 100);
+  const lines = [
+    ['⛏', '两只手柄都是镐。站着挥，砸你四周腰那么高的方块。'],
+    ['⬇', '四周一圈全部挖空，脚下就塌了，往下掉一层。'],
+    ['🪨', '石块从上面掉进四周的格子：填上挖开的洞、越堆越高。'],
+    ['⚠', '高出腰的碎石太多就被埋住了，先把高的砸掉。'],
+    ['💎', '宝石、金矿加分；红色炸药一下炸开整圈。'],
+  ];
+  g.font = `600 34px ${FONT}`;
+  lines.forEach(([icon, t], i) => {
+    g.fillStyle = '#f5b941'; g.fillText(icon, 50, 180 + i * 72);
+    g.fillStyle = '#eef2fb'; g.fillText(t, 110, 180 + i * 72);
+  });
+  g.fillStyle = '#5cffb0'; g.font = `700 36px ${FONT}`; g.textAlign = 'center';
+  g.fillText('扣扳机开始', w / 2, h - 40);
+});
 
 function drawHud() {
   panel.redraw((g, w, h) => {
     roundRect(g, 4, 4, w - 8, h - 8, 34);
-    g.fillStyle = 'rgba(16,20,34,0.86)'; g.fill();
+    g.fillStyle = 'rgba(16,20,34,0.82)'; g.fill();
     g.lineWidth = 4; g.strokeStyle = 'rgba(255,255,255,0.18)'; g.stroke();
     g.textBaseline = 'alphabetic';
-    // 深度 + 分区
-    g.fillStyle = '#ffd166'; g.font = `800 66px ${FONT}`; g.textAlign = 'left';
-    g.fillText(`${(depth * C).toFixed(1)} 米`, 34, 86);
-    g.fillStyle = '#9aa6c2'; g.font = `600 28px ${FONT}`;
-    g.fillText(zoneOf(depth).name, 36, 124);
-    // 心
-    g.textAlign = 'right'; g.font = `700 46px ${FONT}`;
-    let hs = '';
-    for (let i = 0; i < HEARTS; i++) hs += i < hearts ? '♥' : '♡';
-    g.fillStyle = '#ff5d73'; g.fillText(hs, w - 34, 80);
-    g.fillStyle = '#eef2fb'; g.font = `700 32px ${FONT}`;
-    g.fillText(`得分 ${score()}`, w - 34, 124);
+    g.fillStyle = '#ffd166'; g.font = `800 64px ${FONT}`; g.textAlign = 'left';
+    g.fillText(`${(depth * 0.6).toFixed(1)} 米`, 34, 82);
+    g.fillStyle = '#9aa6c2'; g.font = `600 26px ${FONT}`;
+    g.fillText(`${zoneOf(depth).name} · 这一圈还剩 ${ringLeft()} 格`, 36, 120);
+    g.textAlign = 'right';
+    g.fillStyle = '#eef2fb'; g.font = `700 34px ${FONT}`;
+    g.fillText(`得分 ${score()}`, w - 34, 70);
     g.fillStyle = '#9aa6c2'; g.font = `500 24px ${FONT}`;
-    g.fillText(`矿石 ${ore} · 最高 ${best}`, w - 34, 156);
+    g.fillText(`矿石 ${ore} · 最高 ${best}`, w - 34, 106);
     // 被埋进度条
-    const fill = Math.min(1, pileCount() / BURY);
-    const bx = 34, by = 176, bw = w - 68, bh = 30;
+    const fill = Math.min(1, buryCount() / BURY);
+    const bx = 34, by = 150, bw = w - 68, bh = 28;
     g.textAlign = 'left'; g.fillStyle = '#c9d3ea'; g.font = `600 24px ${FONT}`;
-    g.fillText('碎石', bx, by - 6 + 0);
-    roundRect(g, bx + 64, by - 26, bw - 64, bh, 14); g.fillStyle = 'rgba(255,255,255,0.1)'; g.fill();
+    g.fillText('被埋', bx, by + 21);
+    roundRect(g, bx + 64, by, bw - 64, bh, 13); g.fillStyle = 'rgba(255,255,255,0.1)'; g.fill();
     if (fill > 0) {
-      roundRect(g, bx + 64, by - 26, Math.max(28, (bw - 64) * fill), bh, 14);
+      roundRect(g, bx + 64, by, Math.max(26, (bw - 64) * fill), bh, 13);
       g.fillStyle = fill > 0.75 ? '#ff4d4d' : fill > 0.5 ? '#ffb347' : '#8bd36b'; g.fill();
     }
-    // 消息
     g.textAlign = 'center';
     if (state === 'over') {
-      g.fillStyle = '#ff8080'; g.font = `800 44px ${FONT}`;
-      g.fillText(overReason === 'buried' ? '被埋住了！' : '被砸晕了！', w / 2, 258);
-      g.fillStyle = '#eef2fb'; g.font = `600 28px ${FONT}`;
-      g.fillText(message || '按 A / X 或点“重新开始”', w / 2, 300);
-    } else if (state === 'idle') {
-      g.fillStyle = '#eef2fb'; g.font = `600 30px ${FONT}`;
-      g.fillText('准备好了就开始挖', w / 2, 270);
+      g.fillStyle = '#ff8080'; g.font = `800 40px ${FONT}`;
+      g.fillText('被埋住了！', w / 2, 232);
+      g.fillStyle = '#eef2fb'; g.font = `600 26px ${FONT}`;
+      g.fillText(message, w / 2, 272);
     } else if (messageT > 0) {
       g.fillStyle = '#eef2fb'; g.font = `700 32px ${FONT}`;
-      g.fillText(message, w / 2, 276);
+      g.fillText(message, w / 2, 245);
     } else {
-      g.fillStyle = '#7f8aa8'; g.font = `500 26px ${FONT}`;
-      const t = centreType();
-      g.fillText(`脚下：${TYPES[t].name}（还要敲 ${Math.max(1, centreHP)} 下）`, w / 2, 276);
+      g.fillStyle = '#7f8aa8'; g.font = `500 24px ${FONT}`;
+      g.fillText(menuOpen ? '菜单打开中，游戏暂停' : 'B/Y 或点这块面板：菜单（换背景、退出）', w / 2, 245);
     }
   });
 }
 
-// ================= 防晕 / 受伤闪屏 =================
+// ================= 防晕 / 闪屏 =================
 const vignette = (() => {
   const tex = canvasTex(256, 256, (g) => {
     const grad = g.createRadialGradient(128, 128, 30, 128, 128, 128);
@@ -677,7 +709,7 @@ const vignette = (() => {
 })();
 const flash = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ color: '#c01818', transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
 flash.position.z = -0.11;
-flash.renderOrder = 1001;
+flash.renderOrder = 880;
 camera.add(flash);
 const comfort = loadPref('mine-comfort', '1') === '1';
 
@@ -685,92 +717,95 @@ const comfort = loadPref('mine-comfort', '1') === '1';
 const feet = createFeet({ color: '#ffd166', accent: '#8a5a34' });
 scene.add(feet.object);
 
-// ================= 摆放 =================
+// ================= 摆放：矿井中心对准你脚下，方块顶面在你腰部 =================
 let placeAfter = -1;
 function place(restart = true) {
-  const head = app.headPosition(tmpHead);
   const f = app.headForward(new THREE.Vector3());
-  rig.position.set(head.x, 0, head.z);
+  const head = app.headPosition(new THREE.Vector3());
+  const foot = app.footPosition(new THREE.Vector3());
+  if (!app.presenting) { head.set(0, 1.6, 0); foot.set(0, 0, 0); f.set(0, 0, -1); }
+  rig.position.set(foot.x, 0, foot.z);
   rig.rotation.y = Math.atan2(-f.x, -f.z);
-  if (restart) newGame();
+  const newH = THREE.MathUtils.clamp(head.y - WAIST, 0.6, 1.1);
+  if (restart || Math.abs(newH - H) > 0.02) { H = newH; placeHud(head.y); newGame(); }
+  else placeHud(head.y);
+}
+function placeHud(eyeY) {
+  panel.mesh.position.set(0, eyeY + 0.3, -1.05);
+  panel.mesh.rotation.x = 0.3;
+  menu.position.set(0, eyeY - 0.1, -0.75);
+  intro.mesh.position.set(0, eyeY - 0.05, -0.85);
 }
 
 // ================= 每帧 =================
-let fogColor = new THREE.Color();
+const fogColor = new THREE.Color();
 function onFrame(dt) {
   if (placeAfter > 0) { placeAfter -= dt; if (placeAfter <= 0) place(true); }
   if (app.presenting) {
     app.pollButtons((c, bi) => {
       if (bi === 4) { initAudio(); newGame(); }
-      if (bi === 5) { place(false); say('矿井已经对准你脚下'); }
+      if (bi === 5) setMenu(!menuOpen);
     });
   }
   controls.enabled = !app.presenting;
   if (!app.presenting) controls.update();
 
   envs.update(dt);
-  // 深了就看不见地面了：把背景藏起来省性能
   const env = envs.current;
-  if (env) env.group.visible = !isAR && depthVis * C < 30;
+  if (env) env.group.visible = !isAR && depthVis * H < 25; // 深了就看不见地面了
   const z = zoneOf(depth);
   wallMat.color.lerp(fogColor.set(z.wall), Math.min(1, dt * 1.5));
   wallMatSide.color.copy(wallMat.color);
-  caveLight.intensity = 0.35 + Math.min(0.5, depthVis * 0.04);
-  caveLight.groundColor.set(z.from >= 35 ? '#a8361a' : '#3a2a1c');
+  caveLight.intensity = 0.35 + Math.min(0.5, depthVis * 0.05);
+  caveLight.groundColor.set(z.from >= 28 ? '#a8361a' : '#3a2a1c');
 
-  // 往下掉的动画（先慢后快，像真的往下掉）
   if (fallAnim) {
     fallAnim.t += dt;
     const k = Math.min(1, fallAnim.t / fallAnim.dur);
     depthVis = fallAnim.from + (fallAnim.to - fallAnim.from) * k * k;
-    if (k >= 1) { fallAnim = null; depthVis = depth; sfx.land(); app.pulseAll(0.5, 60); }
+    if (k >= 1) { fallAnim = null; depthVis = depth; sfx.land(); }
   }
-  world.position.y = depthVis * C;
+  world.position.y = depthVis * H;
+  shaft.updateWorldMatrix(true, false);
+  holeUniforms.uShaftInv.value.copy(shaft.matrixWorld).invert();
+  holeUniforms.uTop.value = H + 0.5;
 
-  // 石堆方块落到位
-  for (const p of piles) for (const m of p) {
-    const ty = m.userData.ty;
-    if (m.position.y > ty) m.position.y = Math.max(ty, m.position.y - dt * 6);
-    else m.position.y = ty;
-  }
+  // 敲过的方块晃回原位
+  for (const k of RING) for (const u of cols[k]) u.mesh.position.x += (colX(k) - u.mesh.position.x) * Math.min(1, dt * 20);
 
-  // 头的位置（矿井坐标）
-  const headW = app.headPosition(tmpHead);
-  const headL = shaft.worldToLocal(headW.clone());
-  if (!app.presenting) { headL.x = 0; headL.z = 0; }
-
-  if (state === 'playing') {
+  if (state === 'playing' && !menuOpen) {
     elapsed += dt;
     spawnTimer -= dt;
     if (spawnTimer <= 0) {
       spawnRock();
-      if (depth > 15 && Math.random() < 0.25) spawnRock();
-      spawnTimer = Math.max(SPAWN_MIN, SPAWN_START - elapsed * 0.022 - depth * 0.025) * (0.75 + Math.random() * 0.5);
+      if (depth > 10 && Math.random() < 0.25) spawnRock();
+      spawnTimer = Math.max(SPAWN_MIN, SPAWN_START - elapsed * 0.02 - depth * 0.04) * (0.75 + Math.random() * 0.5);
     }
-    updateRocks(dt, headL);
+    updateRocks(dt);
     updatePicks(dt);
     if (messageT > 0 && messageT < 900) { messageT -= dt; if (messageT <= 0) drawHud(); }
   } else {
     for (const c of app.controllers) c.prevTip = null;
   }
 
-  // 面板按钮：手柄射线指着按钮才显示射线
+  // 射线只在指着面板/菜单时才显示
   if (app.presenting) {
+    const targets = uiTargets();
     const hovered = new Set();
     for (const c of app.controllers) {
       if (!c.inputSource) continue;
-      const hit = app.pointAt(c, uiButtons, 3);
+      const hit = app.pointAt(c, targets, 3);
       c.hover = hit ? hit.object : null;
       c.line.visible = !!hit;
       if (hit) hovered.add(hit.object);
     }
-    for (const b of uiButtons) b.userData.ui.setHover(hovered.has(b));
-    feet.update(headW, app.headForward(tmpV), 0, dt);
+    for (const b of menuButtons) b.userData.ui.setHover(hovered.has(b));
+    feet.update(app.footPosition(tmpV), app.headForward(new THREE.Vector3()), 0, dt);
   } else feet.hide();
 
   if (vignette.material.opacity > 0) vignette.material.opacity = Math.max(0, vignette.material.opacity - dt * 2.2);
-  if (flash.material.opacity > 0 && state !== 'over') flash.material.opacity = Math.max(0, flash.material.opacity - dt * 2.5);
-  else if (state === 'over') flash.material.opacity = Math.max(0.35, flash.material.opacity - dt * 0.8);
+  if (state === 'over') flash.material.opacity = Math.max(0.35, flash.material.opacity - dt * 0.8);
+  else if (flash.material.opacity > 0) flash.material.opacity = Math.max(0, flash.material.opacity - dt * 2.5);
 
   for (let n = effects.length - 1; n >= 0; n--) {
     const e = effects[n];
@@ -784,15 +819,17 @@ function onFrame(dt) {
 app.on('select', (c) => {
   initAudio();
   const t = c.hover;
-  if (t?.userData.ui) { app.pulse(c, 0.4, 30); t.userData.ui.onClick?.(); }
+  if (t?.userData.ui) { app.pulse(c, 0.4, 30); t.userData.ui.onClick?.(); return; }
+  if (state === 'intro') startPlaying();
+  else if (state === 'over') newGame();
 });
 
 // ================= 电脑上预览 =================
-camera.position.set(0, 2.9, 1.6); // 电脑预览：从背后斜上方看（后墙从背面看是透明的）
+camera.position.set(0, 3.0, 2.3); // 从背后斜上方看（后墙从背面看是透明的）
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 0.9, -0.35);
+controls.target.set(0, 0.6, -0.3);
 controls.enableDamping = true;
-controls.maxDistance = 4;
+controls.maxDistance = 5;
 const mouse = new THREE.Vector2();
 const mouseRay = new THREE.Raycaster();
 let downAt = null;
@@ -808,22 +845,22 @@ renderer.domElement.addEventListener('pointerup', (e) => {
   clickTargets(mouseRay);
 });
 function clickTargets(ray) {
-  const targets = [...uiButtons, ...rocks.map((r) => r.mesh)];
-  for (let k = 0; k < 9; k++) if (piles[k].length) targets.push(piles[k][piles[k].length - 1]);
-  if (layers.has(depth)) targets.push(centreMesh());
+  const ui = uiTargets();
+  const uiHit = ray.intersectObjects(ui, false)[0];
+  if (uiHit) return uiHit.object.userData.ui.onClick?.();
+  if (state === 'intro') return startPlaying();
+  const targets = rocks.map((r) => r.mesh);
+  for (const k of RING) for (const u of cols[k]) targets.push(u.mesh);
   const hit = ray.intersectObjects(targets, false)[0];
   if (!hit) return;
-  const o = hit.object;
-  if (o.userData.ui) return o.userData.ui.onClick?.();
-  const r = rocks.find((rk) => rk.mesh === o);
+  const r = rocks.find((rk) => rk.mesh === hit.object);
   if (r) return hitRock(r);
-  if (o.userData.pile) return hitPile(o.userData.k);
-  if (o === centreMesh()) hitCentre(1);
+  hitColumn(hit.object.userData.k);
 }
 window.addEventListener('keydown', (e) => {
   if (app.presenting) return;
   if (e.code === 'KeyR') newGame();
-  if (e.code === 'Space') { e.preventDefault(); initAudio(); hitCentre(1); }
+  if (e.code === 'KeyM' || e.code === 'Escape') setMenu(!menuOpen);
 });
 
 // ================= 页面 =================
@@ -844,7 +881,7 @@ envSelect.addEventListener('change', () => envs.set(envSelect.value));
   const [vr, ar] = await Promise.all([app.supports('immersive-vr'), app.supports('immersive-ar')]);
   btnVR.hidden = !vr;
   btnAR.hidden = !ar;
-  if (!vr && !ar) note.textContent = '这台设备不支持 VR。可以先在电脑上预览：点方块 = 敲一下，空格 = 敲脚下，R 重来，拖动转视角。';
+  if (!vr && !ar) note.textContent = '这台设备不支持 VR。可以先在电脑上预览：点方块 = 敲一下，M 打开菜单，R 重来，拖动转视角。';
 })();
 async function start(mode) {
   initAudio();
@@ -860,15 +897,18 @@ btnDesktop.addEventListener('click', () => {
   newGame();
 });
 
-ensureLayers();
-resetCentre();
+placeHud(1.6);
+layoutWorld();
+fillRing();
+buildBelow();
 drawHud();
 
 // 调试用
 window.minegame = {
-  get state() { return state; }, get depth() { return depth; }, get hearts() { return hearts; }, get piles() { return piles.map((p) => p.length); },
-  get rocks() { return rocks; }, get score() { return score(); }, get ore() { return ore; }, get centreHP() { return centreHP; },
-  newGame, hitCentre, hitPile, hitRock, spawnRock, clickTargets, camera, controls, envs, rig, shaft,
-  get falling() { return !!fallAnim; }, controllers: app.controllers, setHearts(n) { hearts = n; },
-  setSpawn(t) { spawnTimer = t; },
+  get state() { return state; }, get depth() { return depth; }, get cols() { return cols.map((c) => c.length); },
+  get rocks() { return rocks; }, get score() { return score(); }, get ore() { return ore; }, get bury() { return buryCount(); },
+  get ringLeft() { return ringLeft(); }, get menuOpen() { return menuOpen; }, RING,
+  newGame, hitColumn, hitRock, spawnRock, clickTargets, startPlaying, setMenu, camera, controls, envs, rig, shaft,
+  get falling() { return !!fallAnim; }, controllers: app.controllers,
+  setSpawn(t) { spawnTimer = t; }, get H() { return H; },
 };
